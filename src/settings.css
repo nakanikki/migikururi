@@ -1,0 +1,1855 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: #1e1e26;
+  color: #eaeaf0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  /* アプリ内の文字はドラッグ選択させない（選択状態だとドラッグ操作が
+     おかしくなるため）。入力欄だけ下で選択を許可する。 */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* テキスト入力・編集できる要素だけ選択を許可する。 */
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+header {
+  padding: 18px 22px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+header h1 {
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hotkey-row label {
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.hotkey-row small {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+input[type="text"] {
+  background: #2a2a34;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #eaeaf0;
+  padding: 7px 10px;
+  font-size: 13px;
+  outline: none;
+}
+
+input[type="text"]:focus {
+  border-color: #4f8cff;
+}
+
+.hotkey-capture {
+  min-width: 120px;
+  background: #2a2a34;
+  color: #eaeaf0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-family: "Consolas", monospace;
+}
+
+.hotkey-capture:hover {
+  background: #34343f;
+}
+
+.hotkey-capture.capturing {
+  border-color: #4f8cff;
+  background: #1f2a44;
+  color: #9cc0ff;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  /* アプリ全体の外周マージンは無し（タブ・エディタを画面端まで広げる）。 */
+  padding: 0;
+}
+
+/* プロファイルタブバー（カードタブ方式・線の重なりを使わず崩れない）。 */
+/* ブラウザ風タブバー: 下辺のラインの上にタブが乗り、アクティブタブだけ
+   ラインを途切れさせて下の編集エリアと一体に見せる（＝フォルダタブ）。 */
+.tabbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  padding: 0;
+  /* パネルと隙間なく接するよう margin を 0 に。アクティブタブは下の
+     ::after でパネルへ繋ぐので、ここでは下辺ラインだけ引く。 */
+  margin-bottom: 0;
+  border-bottom: 2px solid rgba(79, 140, 255, 0.35);
+  position: relative;
+  z-index: 2;
+  overflow: hidden; /* スクロールは内側の .tab-strip が担当 */
+}
+
+/* タブ列（スクロールする部分）。タブは固定幅のまま、入りきらなければ
+   横スクロール（縮小はしない）。◀▶ボタンと＋は外側に固定で残る。 */
+.tab-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* スクロールバーは出さない（操作は ◀▶ ボタンとホイールで行う）。 */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* 旧 Edge/IE */
+}
+.tab-strip::-webkit-scrollbar {
+  display: none; /* Chrome/WebView2 */
+}
+
+/* タブ左右スクロールボタン（◀ ▶）。はみ出し時のみ表示。 */
+.tab-scroll {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  margin-bottom: 4px;
+  width: 24px;
+  height: 28px;
+  padding: 0;
+  font-size: 11px;
+  color: #eaeaf0;
+  background: #20202a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.tab-scroll:hover {
+  background: #34343f;
+}
+.tab-scroll.hidden {
+  display: none;
+}
+.tab-scroll.disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* ドラッグ中の移動先を示す矢印オーバーレイ（画面全体・最前面）。 */
+.drag-arrow {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 90;
+  pointer-events: none;
+  display: none;
+}
+.drag-arrow.show {
+  display: block;
+}
+.drag-arrow .da-line {
+  fill: none;
+  stroke: #4f8cff;
+  stroke-width: 3px;
+  stroke-linecap: round;
+  stroke-dasharray: 7 5;
+  filter: drop-shadow(0 0 4px rgba(79, 140, 255, 0.6));
+}
+.drag-arrow .da-head {
+  fill: #4f8cff;
+  filter: drop-shadow(0 0 4px rgba(79, 140, 255, 0.6));
+}
+
+/* タブ並べ替えドラッグ中はテキスト選択を抑止＆掴みカーソル。 */
+body.tab-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+/* 並べ替えのドロップ先候補タブ。 */
+.tab.drop-target {
+  box-shadow: inset 3px 0 0 0 #4f8cff;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px 9px;
+  margin-bottom: -2px; /* 下辺ラインへ重ねる */
+  /* タブは固定幅（縮小しない）。入りきらなければ .tab-strip が横スクロール。 */
+  flex: 0 0 auto;
+  /* 非アクティブ: 暗く沈め、上だけ角丸のフォルダタブ。 */
+  background: #191920;
+  color: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: none;
+  border-radius: 9px 9px 0 0;
+  font-size: 13px;
+  cursor: pointer;
+  top: 3px; /* 非アクティブは少し沈める */
+  transition: background 0.12s ease, color 0.12s ease,
+    border-color 0.12s ease, top 0.1s ease;
+}
+/* 非アクティブタブは青い横線の上へ持ち上げ、線に被らないようにする。
+   下にも余白(margin-bottom)を空けて線との間に隙間を作り、四隅角丸の
+   独立したタブに見せる。 */
+.tab:not(.active) {
+  margin: 0 3px 5px; /* 下に 5px の隙間＝青線の上に浮かせる */
+  padding: 6px 12px 7px;
+  top: 0;
+  background: #17171d;
+  border-radius: 8px; /* 上下とも角丸の独立タブ */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.tab:not(.active):hover {
+  background: #24242f;
+  color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 4px; /* ホバーで少しだけ下げて反応を出す */
+}
+
+/* アクティブ: 下のラインを切って編集エリアと地続きに＋上に青いアクセント帯。 */
+.tab.active {
+  background: #2d3447;
+  color: #fff;
+  font-weight: 700;
+  top: 0;
+  border-color: rgba(79, 140, 255, 0.6);
+  /* 下端を背景色で塗り、青ラインを跨いで下のエリアと繋げる。 */
+  box-shadow: 0 2px 0 0 #2d3447, 0 -2px 10px rgba(79, 140, 255, 0.15);
+}
+.tab.active::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 0;
+  height: 3px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #4f8cff, #7aa9ff);
+}
+/* アクティブタブの下端を下のパネルへ繋ぐブリッジ。青い下辺ラインを
+   タブ色で跨いで覆い、タブとパネルが地続きに見えるようにする。 */
+.tab.active::after {
+  content: "";
+  position: absolute;
+  left: -1px; /* 左右の border を覆う */
+  right: -1px;
+  bottom: -2px; /* tabbar の下辺ライン(2px)を跨ぐ */
+  height: 4px;
+  background: #2d3447;
+  z-index: 1;
+}
+
+.tab-title {
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 未設定（登録アプリ名を自動表示）のタブ名は少し控えめに。 */
+.tab-title.auto {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+/* アプリ重複の警告「！」（タブの一番右）。 */
+.tab-dup-warn {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 800;
+  color: #1a1a22;
+  background: #ffcf4d;
+  border-radius: 50%;
+}
+/* アプリ被り警告ホバー時、衝突している全ての ! マーク（自分含む）を光らせる。 */
+.tab-dup-warn.warn-flash {
+  animation: warn-flash 0.55s ease;
+}
+@keyframes warn-flash {
+  0% {
+    transform: scale(1.5);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(255, 207, 77, 0.7), 0 0 12px rgba(255, 207, 77, 0.9);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 207, 77, 0);
+  }
+}
+
+/* 「大事」タグ（保護中のタブに表示）。 */
+.tab-protected-tag {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffd166;
+  background: rgba(255, 209, 102, 0.16);
+  border: 1px solid rgba(255, 209, 102, 0.5);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+/* 「無効」バッジ（enabled=false のタブ）。赤系で目立たせる。 */
+.tab-disabled-tag {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ff8a8a;
+  background: rgba(234, 84, 85, 0.18);
+  border: 1px solid rgba(234, 84, 85, 0.6);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* 無効プロファイルのタブ全体をうっすら赤く（一目で分かるように）。
+   非アクティブ・アクティブとも赤帯を載せる。 */
+.tab.is-disabled {
+  background: #2a1c1f;
+  border-color: rgba(234, 84, 85, 0.45);
+}
+.tab.is-disabled:not(.active) {
+  background: #271a1d;
+}
+.tab.is-disabled.active {
+  background: #3a2630;
+  border-color: rgba(234, 84, 85, 0.7);
+  box-shadow: 0 2px 0 0 #3a2630, 0 -2px 10px rgba(234, 84, 85, 0.18);
+}
+.tab.is-disabled.active::after {
+  background: #3a2630; /* 下のパネルへ繋ぐブリッジも赤系に合わせる */
+}
+.tab.is-disabled .tab-title {
+  opacity: 0.65;
+}
+
+.tab-close {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.tab.active .tab-close {
+  color: rgba(255, 255, 255, 0.7);
+}
+.tab-close:hover {
+  color: #ea5455;
+}
+.tab-add {
+  align-self: flex-end;
+  /* タブ列の末尾（最後のタブの右隣）。縮まず固定幅でタブと一緒にスクロール。 */
+  flex: 0 0 auto;
+  margin-left: 6px;
+  margin-bottom: 4px;
+  padding: 5px 11px;
+  background: #20202a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  color: #eaeaf0;
+  cursor: pointer;
+  font-size: 14px;
+}
+.tab-add:hover {
+  background: #34343f;
+}
+
+/* フォルダリンク2行（タブバー右上に固定）。スクロールしない。 */
+.tab-folder-links {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  margin-left: 8px;
+  margin-bottom: 3px;
+}
+/* 下線付きのリンク風テキスト（ボタン要素だが見た目はリンク）。 */
+.folder-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #7aa9ff;
+  font-size: 11px;
+  line-height: 1.5;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.folder-link:hover {
+  color: #a7c5ff;
+}
+
+.tab-name-edit {
+  width: 120px;
+  font-size: 13px;
+  background: #1a1a22;
+  border: 1px solid #4f8cff;
+  border-radius: 4px;
+  color: #fff;
+  padding: 2px 5px;
+  outline: none;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+#apps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-gap {
+  margin-top: 22px;
+}
+
+.head-btns {
+  display: flex;
+  gap: 8px;
+}
+
+.hint-text {
+  font-size: 11px;
+  opacity: 0.5;
+  margin-bottom: 8px;
+}
+
+.hint-text b {
+  opacity: 0.9;
+  color: #ffd166;
+}
+
+/* ── 項目数スライダー ── */
+.count-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* ラベル＋値をバー内部に重ねるスライダー。range は透明で全面に重ね、
+   トラックはラッパーの背景（紫）で表現し、テキストはその上に置く。 */
+.slider-wrap {
+  position: relative;
+  flex: 1;
+  max-width: 240px;
+  height: 26px;
+  border-radius: 7px;
+  background: #4a4566;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.slider-wrap input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: ew-resize;
+  z-index: 2;
+}
+.slider-wrap input[type="range"]::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+.slider-wrap input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 6px;
+  height: 26px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
+
+/* バー内のテキスト（ラベル＋値）。クリックは下の range が受ける。 */
+.slider-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+  font-size: 12px;
+  color: #fff;
+}
+.slider-label {
+  opacity: 0.85;
+}
+.slider-value {
+  font-weight: 700;
+}
+
+/* ── 円形プレビュー＋ノード＋コネクタ ── */
+/* キャンバス（ビューポート）: パン/ズーム可能。中身は #world を transform。 */
+.editor {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  /* 灰×濃い灰の市松（チェッカー）模様。明るめ・さらに低コントラスト。 */
+  background-color: #30303a;
+  background-image:
+    conic-gradient(
+      #33333d 25%,
+      #2f2f39 0 50%,
+      #33333d 0 75%,
+      #2f2f39 0
+    );
+  background-size: 56px 56px;
+  /* 画面端まで広げたので外周の角丸・枠は無し。 */
+  border: none;
+  border-radius: 0;
+  overflow: hidden; /* スクロールバーは出さずパン/ズームで移動 */
+  touch-action: none;
+}
+
+/* UE5 ビューポート風のフローティングツールバー。
+   外側パネルは持たず、中の要素（スライダー/ボタン）が単体で浮く（1重）。 */
+.floating-toolbar {
+  position: absolute;
+  top: 10px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.floating-toolbar.toolbar-left {
+  left: 10px;
+}
+.floating-toolbar.toolbar-bottom-left {
+  left: 10px;
+  top: auto;
+  bottom: 10px;
+  /* 横フローコンテナ。幅が足りなければ折り返す（＋アプリ用に右側を空ける）。 */
+  right: 120px;
+  flex-wrap: wrap;
+  align-content: flex-end; /* 折り返し時は下寄せ＝上へ積む */
+  row-gap: 8px;
+}
+
+/* 通知トーストの置き場（左上）。新しいトーストは下へ積まれる。 */
+.toast-stack {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
+/* 1つ分のトースト。出現時に下へスライドしながらフェードイン。 */
+.toast {
+  padding: 6px 14px;
+  background: rgba(40, 199, 111, 0.92);
+  color: #08210f;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  white-space: pre-line; /* メッセージ内の改行(\n)を反映 */
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ブロック削除トースト: メッセージ＋アンドゥボタンを横並び。 */
+.toast-delete {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.toast-delete .toast-undo {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #08210f;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(8, 33, 15, 0.4);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.toast-delete .toast-undo:hover {
+  background: #fff;
+}
+
+.status-hidden {
+  display: none;
+}
+
+.floating-toolbar .slider-wrap {
+  flex: 0 0 auto;
+  width: 150px;
+}
+
+/* ツールバーの要素はそれぞれ単体で浮く（半透明背景＋blur）。 */
+.floating-toolbar .btn-add {
+  background: rgba(28, 28, 36, 0.82);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.floating-toolbar .btn-add:hover {
+  background: rgba(40, 40, 52, 0.9);
+}
+
+/* オン/オフのトグルボタン（外側有効など）。 */
+.toggle-btn {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(28, 28, 36, 0.82);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease,
+    border-color 0.12s ease;
+}
+.toggle-btn:hover {
+  background: rgba(40, 40, 52, 0.9);
+  color: rgba(255, 255, 255, 0.85);
+}
+/* オン状態: 青く点灯。 */
+.toggle-btn.on {
+  color: #fff;
+  background: rgba(79, 140, 255, 0.9);
+  border-color: #4f8cff;
+  box-shadow: 0 0 0 1px #4f8cff, 0 4px 14px rgba(79, 140, 255, 0.3);
+}
+
+/* カスタムツールチップ（data-tip 属性の要素にホバーで即表示）。
+   ブラウザ標準 title の表示遅延が無く、見た目も整えられる。 */
+#tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: 280px;
+  padding: 8px 11px;
+  background: rgba(20, 20, 28, 0.97);
+  color: #eaeaf0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-line; /* data-tip の改行(\n)を反映しつつ折り返しも有効 */
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.08s ease;
+}
+#tooltip.show {
+  opacity: 1;
+}
+
+/* ズーム% 表示（ホイール時に出て 1 秒で消える） */
+.zoom-indicator {
+  position: absolute;
+  left: 10px;
+  top: 10px; /* 左上（項目数を左下へ移したので空いた） */
+  z-index: 10;
+  padding: 3px 9px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #eaeaf0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+
+.zoom-indicator.show {
+  opacity: 1;
+  transition: opacity 0.05s ease;
+}
+
+/* 変形レイヤ。translate+scale でパン/ズームする。 */
+.world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: 0 0;
+}
+
+.preview {
+  position: absolute;
+  line-height: 0;
+  z-index: 2;
+}
+
+/* パイ中心ハンドルの上に出す「表示」トグル（本番でパイ本体を出すか）。 */
+.pie-vis-toggle {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  z-index: 6;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: normal;
+  white-space: nowrap;
+  border-radius: 6px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+.pie-vis-toggle.on {
+  background: rgba(79, 140, 255, 0.85);
+  color: #fff;
+  border-color: #4f8cff;
+}
+
+.pv-seg {
+  cursor: pointer;
+  transition: filter 0.1s ease;
+}
+
+.pv-seg:hover {
+  filter: brightness(1.12);
+}
+
+/* セグメントのドロップ先ハイライト（交換候補） */
+.pv-seg.seg-drop {
+  filter: brightness(1.4);
+  stroke: #fff;
+  stroke-width: 3px;
+}
+
+/* ラベルの背景帯（薄い黒）。文字の可読性を上げる。文字より後ろ。 */
+.pv-label-bg {
+  fill: rgba(0, 0, 0, 0.45);
+  cursor: text;
+}
+
+.pv-label {
+  fill: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: text;
+}
+/* 自動命名中（手動ラベル無し）は少し控えめに表示。 */
+.pv-label.auto {
+  fill: rgba(255, 255, 255, 0.82);
+  font-weight: 500;
+}
+
+/* 色＋透明度のポップオーバー */
+.color-popover {
+  position: fixed;
+  z-index: 50;
+  background: #25252e;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.color-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.color-popover input[type="color"] {
+  width: 36px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.color-popover .slider-wrap {
+  width: 150px;
+  flex: 0 0 auto;
+}
+
+/* ラベルのインライン編集 input（プレビューに重ねる） */
+.pv-label-edit {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 84px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 4px;
+  border: 1px solid #4f8cff;
+  border-radius: 4px;
+  background: #1a1a22;
+  color: #fff;
+  outline: none;
+  z-index: 5;
+}
+
+.pv-hub {
+  fill: rgba(20, 20, 28, 0.9);
+  stroke: rgba(255, 255, 255, 0.14);
+  stroke-width: 2px;
+}
+
+/* 中心の移動ハンドル（角丸四角・全体ドラッグ移動用） */
+.pv-move-handle {
+  fill: rgba(80, 90, 120, 0.95);
+  stroke: rgba(255, 255, 255, 0.4);
+  stroke-width: 1.5px;
+  cursor: move;
+}
+.pv-move-handle:hover {
+  fill: #4f8cff;
+}
+.pv-move-grip {
+  fill: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+}
+
+/* 内径ハンドル（中央ハブの縁をドラッグで内径変更）。半径方向(放射状)に
+   伸縮するので、上下(ns)ではなく「サイズ変更」を表す斜め両矢印にする。 */
+.pv-inner-handle {
+  cursor: nwse-resize;
+}
+.pv-inner-handle:hover {
+  stroke: #4f8cff;
+  stroke-width: 3px;
+}
+
+/* 外周ハンドル（外周リングをドラッグで全体サイズ変更）。透明・太め。
+   半径方向に伸縮するので「サイズ変更」を表す斜め両矢印カーソルにする。 */
+.pv-outer-handle {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14px;
+  cursor: nwse-resize;
+  pointer-events: stroke;
+}
+.pv-outer-handle:hover {
+  stroke: rgba(79, 140, 255, 0.4);
+}
+
+/* 回転ハンドル（外周の少し外の丸を掴んでパイ全体を回す）。 */
+.pv-rotate-handle {
+  fill: rgba(80, 90, 120, 0.95);
+  stroke: rgba(255, 255, 255, 0.4);
+  stroke-width: 1.5px;
+  cursor: default;
+}
+.pv-rotate-handle:hover {
+  fill: #4f8cff;
+}
+.pv-rotate-icon {
+  fill: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* セグメント外周の接続ハンドル（見える点）。ノード側ポートと同じデザイン:
+   セグメント色の丸＋暗いボーダー＋薄い白リング。色は JS で fill 指定。 */
+.pv-handle {
+  stroke: #1c1c24;
+  stroke-width: 2px;
+  filter: drop-shadow(0 0 0 rgba(255, 255, 255, 0.3));
+  paint-order: stroke;
+}
+
+/* 接続ハンドルの当たり判定（透明・大きめ）。掴みやすさ用。 */
+.pv-handle-hit {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+/* 当たり円ホバーで見える点を強調 */
+.pv-handle-hit:hover + .pv-handle {
+  stroke: #fff;
+}
+
+/* コネクタ線。ノード（特にメニューブロック）より背面に置く。
+   メニューブロックを配線より前面に出すことで、ブロックへ入る配線が
+   ブロックの枠で隠れて止まり、枠を貫いて見えなくする（描画優先度の統一）。 */
+.connectors {
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* viewBox(0 0 4000 4000)の外（負座標や左/上）も描けるよう overflow を可視に。
+     これをしないと SVG 要素ボックス外の配線が「一定座標で切れる」。 */
+  overflow: visible;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.connector {
+  fill: none;
+  stroke-width: 2.5px;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+/* 当たり判定用の透明な線。右クリックで配線削除。前面(z4)にあるので、
+   ノード操作を妨げないよう細めにする（ナイフ切断は別途ジオメトリ判定）。 */
+.connector-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 9px;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.connector.linking {
+  stroke: #4f8cff;
+  stroke-dasharray: 5 4;
+  opacity: 1;
+}
+
+/* ナイフカットの軌跡（右ボタンドラッグで配線を横切る）。 */
+.knife-trail {
+  fill: none;
+  stroke: #ff5a5a;
+  stroke-width: 2px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
+  pointer-events: none;
+  filter: drop-shadow(0 0 4px rgba(255, 90, 90, 0.7));
+}
+
+/* ナイフ操作中にカーソル近くへ出す解説ラベル（黒半透明）。 */
+.knife-hint {
+  position: fixed;
+  z-index: 220;
+  padding: 5px 10px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #ffd9d9;
+  border: 1px solid rgba(255, 90, 90, 0.55);
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+/* 矩形選択（左ドラッグ）の解説ラベル。ナイフ(削除=赤)と区別して青系・中立。 */
+.select-hint {
+  position: fixed;
+  z-index: 220;
+  padding: 5px 10px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #d9e6ff;
+  border: 1px solid rgba(79, 140, 255, 0.6);
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+/* アクションノード群のレイヤ（個々は絶対配置） */
+.nodes {
+  position: absolute;
+  inset: 0;
+  /* 配線(.connectors z3)より前面に置き、ブロックが配線を隠して
+     「ブロックの枠で配線が止まる」見た目にする（描画優先度の統一）。 */
+  z-index: 4;
+  pointer-events: none; /* 子の .anode だけ受ける */
+}
+
+/* キャンバス上に自由配置されるアクションノード（1行・アイコンなし）。
+   種別 → 値 → 複製 → 削除。値の部分を掴んでドラッグ移動。 */
+.anode {
+  position: absolute;
+  width: 220px;
+  display: flex;
+  /* 子を縦いっぱいに伸ばす。select 等の上下に grab な隙間を作らない
+     （カーソルのチラつき防止）。 */
+  align-items: stretch;
+  gap: 4px;
+  padding: 3px;
+  background: #2f3340;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  /* ブロックを軽く浮かせるソフトシャドウ。 */
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  user-select: none;
+  cursor: default; /* 掴めるカーソルは出さない */
+  border-radius: 8px;
+}
+
+/* 値の部分（種別ごとの入力）。ドラッグで掴めるが、掴めるカーソルは
+   出さない（操作部品の自然なカーソルのままにしてチラつきを防ぐ）。 */
+.anode-r2 {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  cursor: default;
+}
+
+/* キャンバスの右クリックメニュー（何もない所で単発右クリック）。 */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 160px;
+  padding: 4px;
+  background: #2b2f3a;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  user-select: none;
+}
+
+/* セグメント色のポップアップ（カーソル近くに出す自前ピッカー）。 */
+.color-popup {
+  position: fixed;
+  z-index: 210;
+  padding: 8px;
+  background: #2b2f3a;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  user-select: none;
+}
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 22px);
+  gap: 6px;
+}
+.color-sw {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+  padding: 0;
+}
+.color-sw:hover {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+.color-more {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #cfd3dd;
+  cursor: pointer;
+}
+.color-more input[type="color"] {
+  width: 26px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+.ctx-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  font-size: 13px;
+  color: #e6e9f0;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.ctx-menu-item:hover {
+  background: rgba(79, 140, 255, 0.25);
+}
+.ctx-menu-item.danger {
+  color: #ff9a9a;
+}
+.ctx-menu-item.danger:hover {
+  background: rgba(255, 90, 90, 0.22);
+}
+.ctx-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* メニューブロックの edit ボタン（種別＝メニュー＋対象選択済みのとき表示）。 */
+.anode-edit {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #cfe0ff;
+  background: rgba(79, 140, 255, 0.18);
+  border: 1px solid rgba(79, 140, 255, 0.5);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.anode-edit:hover {
+  background: rgba(79, 140, 255, 0.3);
+}
+
+/* 展開（メニューブロック）状態。ブロック全体を JS 設定の width/height で
+   固定サイズの箱にし、上段（操作行）＋下段（内包ボックス）の縦並びにする。
+   下/左/右/角を掴んでブロックごとリサイズでき、内包ボックスが残り領域を fill。 */
+.anode.expanded {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  box-sizing: border-box;
+  /* 上下左右にリサイズハンドル分の余白を空け、ハンドルと中身を分離。
+     上辺ハンドルが種別/値の操作子と被らないよう上も少し空ける。 */
+  padding: 8px 7px 7px 7px;
+  border-color: rgba(79, 140, 255, 0.45);
+  /* position は基本 .anode の absolute を継承する（top/left の node.x/y が
+     絶対座標で効くように）。relative にすると top/left が「通常フロー位置から
+     の相対オフセット」扱いになり、複数メニューブロックがフローで積まれて
+     位置が崩れる（2個目が下にずれ配線がちぎれるバグ）。absolute でも
+     リサイズハンドル/子要素の配置基準は成立する。
+     overflow:hidden は付けない（左端◯ポート left:-26px がクリップされ配線が
+     途切れて見えるため）。内包箱は .menu-embed 側でクリップする。 */
+}
+
+/* 上段（種別/値/edit）。元の .anode と同じ横並び。高さは内容なり。 */
+.anode-top {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* 内包領域。ブロックの残り領域を fill する。中に子エディタ（パイ・ノード・
+   配線）を描く。 */
+.menu-embed {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+  position: relative;
+}
+
+/* 子エディタのキャンバス（親 .editor 相当）。内包ボックス全面を使う。
+   背景は親 .editor と同じ市松（チェッカー）模様。 */
+.embed-editor {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* 子の中身（特に overflow:visible の配線SVGや transform 済み #world）が
+     パネル枠外へはみ出すのを確実に止める。overflow:hidden をすり抜ける
+     ケースも clip-path なら境界でハードにクリップできる。 */
+  clip-path: inset(0 round 5px);
+  border-radius: 5px;
+  background-color: #30303a;
+  background-image: conic-gradient(
+    #33333d 25%,
+    #2f2f39 0 50%,
+    #33333d 0 75%,
+    #2f2f39 0
+  );
+  background-size: 56px 56px;
+}
+
+/* 子パネルの左下ツールバー（親の .floating-toolbar.toolbar-bottom-left 相当）。
+   親と同じく「横フロー」で常に1行に並べる。ブロックの初期サイズに依存して
+   折り返さないよう、max-width で頭打ちにせず内容なりの幅(max-content)にする。 */
+.embed-toolbar {
+  position: absolute;
+  left: 8px;
+  right: 8px; /* パネル内側いっぱいを使う＝幅はパネル幅に追従する */
+  bottom: 8px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  /* パネル幅に収まらなければ折り返す（はみ出して画面外に消えないように）。
+     幅はパネル内側(left/right)で決まるので、広いパネルでは1行、狭いと折り返す。 */
+  flex-wrap: wrap;
+  align-content: flex-end; /* 折り返し時は下寄せ＝上へ積む */
+  gap: 6px;
+  row-gap: 6px;
+}
+/* 子パネルのスライダーは固定幅にして、パネルを狭めても潰れないようにする
+   （足りなければ flex-wrap で折り返す）。 */
+.embed-toolbar .slider-wrap {
+  flex: 0 0 auto;
+  width: 130px;
+  min-width: 130px;
+  max-width: none;
+}
+.embed-world {
+  /* .world と同じ（transform 原点・全面）。 */
+}
+
+/* 子/孫パネル右上の Blender 風ナビ（ズーム+ / パン / ズーム-）。縦並びの丸ボタン。
+   zoom 原点を右上にして、rescale(zoom) で右上固定のまま親と同じ画面サイズに保つ。 */
+.embed-nav {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  zoom: 1;
+}
+.embed-nav-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(40, 44, 56, 0.92);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 24px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.embed-nav-btn:hover {
+  background: rgba(79, 140, 255, 0.85);
+  border-color: #4f8cff;
+  color: #fff;
+}
+.embed-nav-btn.embed-nav-pan,
+.embed-nav-btn.embed-nav-zoom {
+  cursor: default; /* ドラッグ操作だがカーソルは変えない（要望に合わせる） */
+}
+
+/* リサイズハンドル。メニューブロック（.anode.expanded）の外周に置く。
+   辺/角でカーソルが変わる。z-index は中身より上。角は辺より優先。 */
+.embed-resize {
+  position: absolute;
+  z-index: 6;
+}
+.embed-resize.bottom {
+  left: 14px;
+  right: 14px;
+  bottom: 0;
+  height: 14px;
+  cursor: ns-resize;
+}
+.embed-resize.top {
+  left: 14px;
+  right: 14px;
+  top: 0;
+  height: 14px;
+  cursor: ns-resize;
+}
+.embed-resize.corner-nw {
+  left: 0;
+  top: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+}
+.embed-resize.corner-ne {
+  right: 0;
+  top: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nesw-resize;
+}
+.embed-resize.left {
+  top: 14px;
+  bottom: 14px;
+  left: 0;
+  width: 14px;
+  cursor: ew-resize;
+}
+.embed-resize.right {
+  top: 14px;
+  bottom: 14px;
+  right: 0;
+  width: 14px;
+  cursor: ew-resize;
+}
+.embed-resize.corner-sw {
+  left: 0;
+  bottom: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nesw-resize;
+}
+.embed-resize.corner-se {
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+}
+/* 右下角にだけ視認用の三角ヒント。 */
+.embed-resize.corner-se::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid rgba(255, 255, 255, 0.35);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.35);
+}
+/* 子エディタ内のブロックは少し小さめに見せる（任意・視認性のため等倍でも可）。 */
+.menu-embed-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  user-select: none;
+  text-align: center;
+}
+
+/* 複数選択ハイライト（ノード・アプリ共通）。 */
+.anode.selected,
+.app-node.selected {
+  outline: 2px solid #4f8cff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.35), 0 3px 10px rgba(0, 0, 0, 0.4);
+}
+
+/* 矩形選択の枠（editor 内に client 座標で表示）。 */
+.marquee {
+  position: absolute;
+  z-index: 40;
+  background: rgba(79, 140, 255, 0.12);
+  border: 1px solid rgba(79, 140, 255, 0.8);
+  pointer-events: none;
+}
+
+/* 合体スタックの角丸: 一体のブロックに見せる。隣接辺の border は消して
+   スタック全体で1つの外周アウトラインに見えるようにする。 */
+/* スタックは1ブロックに見せたいので、影は最下段だけが落とす
+   （中間・上段の影を消して内側に継ぎ目の影が出ないようにする）。 */
+.anode.stack-top {
+  border-radius: 10px 10px 0 0;
+  border-bottom: none;
+  box-shadow: none;
+}
+.anode.stack-mid {
+  border-radius: 0;
+  border-top: none;
+  border-bottom: none;
+  box-shadow: none;
+}
+.anode.stack-bottom {
+  border-radius: 0 0 10px 10px;
+  border-top: none;
+}
+
+/* 配線済み: 外周アウトラインを接続色に。隣接辺は上で none にしてあるので、
+   残った辺（＝スタック外周）だけが色付きになり、全体で1枠に見える。 */
+.anode.linked {
+  border-color: var(--link-color);
+}
+
+.anode.snap {
+  border-color: #28c76f;
+  box-shadow: 0 0 0 2px #28c76f;
+}
+
+.anode.link-target {
+  border-color: #4f8cff;
+  box-shadow: 0 0 0 2px #4f8cff;
+}
+
+/* クイックスロット パネル（表示トグル＋マウス絵＋4行）。 */
+.qpanel {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #20222b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+  user-select: none;
+  cursor: grab;
+  color: #eaeaf0;
+  white-space: nowrap;
+  overflow: visible; /* ◯がパネル外（右）にはみ出すため */
+}
+.qpanel:active {
+  cursor: grabbing;
+}
+/* マウス絵＋4行を横並びにする本体。 */
+.qpanel-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+/* 表示オン/オフトグル（左上）。 */
+.qpanel-toggle {
+  align-self: stretch;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+.qpanel-toggle.on {
+  background: rgba(79, 140, 255, 0.85);
+  color: #fff;
+  border-color: #4f8cff;
+}
+.qpanel-mouse {
+  flex: 0 0 auto;
+  color: #cfcfe0;
+  line-height: 0;
+}
+.qpanel-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qpanel-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  /* ◯がパネル外（右）に出るので、行に右マージンを取って重ならせない。 */
+  padding-right: 6px;
+}
+.qpanel-row .qslot-name {
+  flex: 1;
+  font-weight: 700;
+  color: #cfcfe0;
+}
+/* 行右端の接続ポート（◯）。パネルの外（右）に飛び出して配置。
+   ここからノードへドラッグ、またはノードの◯をここへ落として配線。 */
+.qpanel-row .qslot-port {
+  position: absolute;
+  right: -22px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4a5160;
+  border: 2px solid #1c1c24;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+  cursor: crosshair;
+}
+.qpanel-row .qslot-port.linked {
+  background: #6fdc9a;
+}
+.qpanel-row .qslot-port:hover {
+  box-shadow: 0 0 0 2px #fff;
+}
+/* 配線つけかえドラッグ中、このポートが落とし先のとき強調する。 */
+.qpanel-row .qslot-port.link-target {
+  background: #6fdc9a;
+  box-shadow: 0 0 0 3px #fff, 0 0 8px 2px rgba(111, 220, 154, 0.8);
+}
+/* ノードの◯をこの行へ落とすときのハイライト。 */
+.qpanel-row.drop {
+  background: rgba(79, 140, 255, 0.18);
+  border-radius: 5px;
+}
+
+/* 対象アプリのパネル（キャンバスに自由配置・1行・マージン詰め） */
+.app-node {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  background: #2b3a2e;
+  border: 1px solid rgba(120, 220, 150, 0.4);
+  border-radius: 7px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  user-select: none;
+  /* ドラッグで移動できるが、カーソルは変えない（要望）。 */
+  cursor: default;
+}
+/* 無効アプリ：うっすら表示（右クリック対象から外れている目印）。 */
+.app-node.is-disabled {
+  opacity: 0.4;
+  filter: grayscale(0.6);
+}
+
+/* 有効/無効トグル。ONは緑、OFFは灰。 */
+.app-node .app-toggle {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(120, 220, 150, 0.18);
+  color: #6fdc9a;
+  border: 1px solid rgba(120, 220, 150, 0.5);
+  cursor: pointer;
+}
+.app-node .app-toggle:hover {
+  background: rgba(120, 220, 150, 0.3);
+}
+.app-node .app-toggle.off {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.55);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.app-node .app-capture {
+  flex: 1;
+  min-width: 120px;
+  text-align: left;
+  font-size: 12px;
+  background: #232733;
+  color: #eaeaf0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  padding: 4px 8px;
+  cursor: default; /* ドラッグ移動・クリック取得はできるがカーソルは変えない */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-node .app-capture.empty {
+  color: rgba(255, 255, 255, 0.45);
+}
+.app-node .app-capture:hover {
+  background: #2c3140;
+}
+
+/* ノード左端の接続ポート（◯）。ここからドラッグして配線。
+   接続/未接続で見た目を統一（塗り○＋濃い縁取り＋白リング）。 */
+.anode-port {
+  position: absolute;
+  left: -26px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #1c1c24;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+  cursor: crosshair;
+  z-index: 1;
+}
+/* メニュー（展開）ブロックは巨大なので、◯ポートを縦中央でなく上段
+   （ヘッダー行）の高さに固定する。配線終点(JS: MENU_PORT_TOP=21)と一致させる。 */
+.anode.expanded > .anode-port {
+  top: 21px;
+}
+
+/* 未接続も「色付きの塗り○」で接続済みと同じ質感に揃える。 */
+.anode-port.unlinked {
+  background: #4f8cff;
+}
+
+.anode-port:hover {
+  box-shadow: 0 0 0 2px #fff;
+}
+
+.anode .f-type {
+  flex: 0 0 auto;
+  width: 52px;
+  background: #232733;
+  color: #eaeaf0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 2px 2px;
+  font-size: 11px;
+  cursor: pointer;
+}
+/* メニュー型ブロック（常に展開）の種別セレクトは「メニュー」が ▼ と被るので
+   少し横長にする。 */
+.anode.expanded .f-type {
+  width: 72px;
+}
+
+.anode .f-key {
+  flex: 1;
+  min-width: 0;
+  background: #232733;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  color: #eaeaf0;
+  padding: 3px 5px;
+  font-size: 12px;
+  outline: none;
+}
+
+.anode .f-key:focus {
+  border-color: #4f8cff;
+}
+
+/* キーキャプチャボタン（手打ちでなくクリックして押したキーを取得） */
+.anode .f-capture {
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.anode .f-capture.empty {
+  color: rgba(255, 255, 255, 0.4);
+}
+.anode .f-capture.capturing {
+  border-color: #4f8cff;
+  color: #4f8cff;
+}
+
+/* settings 種別の値なし表示 */
+.anode .f-static {
+  display: flex;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+/* メニューブロックの「▼横」のサブメニュー名（接続セグメントと連動・編集可）。 */
+.anode .f-menu-name::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+.anode .f-menu-name:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.anode .btn-del {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  font-size: 12px;
+}
+
+.anode .btn-dup {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  font-size: 12px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.anode .btn-dup:hover {
+  color: #fff;
+}
+
+.item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #25252e;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.item-row.dragging {
+  opacity: 0.4;
+}
+
+/* ドロップ挿入位置のインジケータ */
+.item-row.drop-above {
+  box-shadow: 0 -3px 0 #4f8cff;
+}
+
+.item-row.drop-below {
+  box-shadow: 0 3px 0 #4f8cff;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 16px;
+  letter-spacing: -3px;
+  padding: 0 2px;
+  user-select: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.item-row input[type="color"] {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.item-row .f-label {
+  flex: 1;
+}
+
+.item-row .f-key {
+  flex: 1;
+}
+
+.item-row .f-type {
+  flex: 0 0 auto;
+  background: #2a2a34;
+  color: #eaeaf0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 6px 4px;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+}
+
+.btn-add {
+  background: #2a2a34;
+  color: #eaeaf0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.btn-add:hover {
+  background: #34343f;
+}
+
+.btn-del {
+  background: transparent;
+  color: #ea5455;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.btn-del:hover {
+  background: rgba(234, 84, 85, 0.15);
+}
+
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 14px 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#status {
+  font-size: 13px;
+  opacity: 0.75;
+  margin-right: auto;
+}
+
+.btn-save {
+  background: #4f8cff;
+  color: #fff;
+}
+
+.btn-save:hover {
+  background: #3f78e6;
+}
+
+/* ── ミニマップ（ナビゲーター・ルート面右上） ────────────────────── */
+.minimap {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  width: 200px;
+  height: 150px;
+  z-index: 25;
+  background: rgba(20, 20, 28, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  cursor: crosshair;
+}
+.minimap-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* 現在の表示範囲を示す赤枠。 */
+.minimap-view {
+  position: absolute;
+  border: 1.5px solid #ff5a5a;
+  background: rgba(255, 90, 90, 0.12);
+  pointer-events: none;
+  box-sizing: border-box;
+}

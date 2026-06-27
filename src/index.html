@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>piemenu</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+  <body>
+    <div id="overlay">
+      <div id="pie">
+        <!-- パイメニュー(SVG)は main.js が動的生成する -->
+      </div>
+      <!-- 選択中セグメントのアウトラインだけ不透明に出す別レイヤ
+           (#pie の opacity の影響を受けないよう兄弟要素にする)。 -->
+      <div id="pie-outline">
+        <!-- アウトライン(SVG)は main.js が動的生成する -->
+      </div>
+    </div>
+    <!-- クイックスロット HUD（マウス絵＋4ボタンの割当ラベル）。
+         ジェスチャ中だけ表示。main.js が中身を生成する。 -->
+    <div id="quick-hud"></div>
+  </body>
+</html>

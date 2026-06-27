@@ -1,0 +1,44 @@
+[package]
+name = "piemenu"
+version = "0.1.0"
+description = "右くるり - 右クリックで放射パイメニュー"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "piemenu_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# 実行バイナリ名。これがタスクバーのホバー名（exe名）になる。
+# 開発(cargo run)・本番とも MigiKururi.exe にする。
+[[bin]]
+name = "MigiKururi"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+enigo = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Graphics_Dwm",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+] }
+
