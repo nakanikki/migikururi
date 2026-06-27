@@ -2776,6 +2776,25 @@ function renderNodes(ctx = currentCtx) {
       // 種別を跨ぐと value の意味が変わるのでクリア（settings/menu 切替含む）。
       if (typeSel.value === "settings") node.value = "";
       if (typeSel.value === "menu" || prev === "menu") node.value = "";
+      // メニュー（サブメニュー）ブロックは連結できない。メニューに変えたら、
+      // 上の親から切り離し（親の next を断つ）、自分の下の子も切り離す。
+      // 切り離したノードが重ならないよう、少しずらして単独配置にする。
+      if (typeSel.value === "menu") {
+        const parent = parentOf(node.id, ctx);
+        if (parent) {
+          parent.next = null;
+          node.x = (node.x || 0) + 40;
+          node.y = (node.y || 0) + 20;
+        }
+        if (node.next) {
+          const child = nodeById(node.next, ctx);
+          if (child) {
+            child.x = (child.x || 0) + 40;
+            child.y = (child.y || 0) + 20;
+          }
+          node.next = null;
+        }
+      }
       markDirty();
       // メニューへ/から切り替わると edit ボタンの有無が変わる（edit は値要素
       // ではなくノード行に出る別要素）。値だけでなくノード全体を描き直す。
@@ -2795,6 +2814,9 @@ function renderNodes(ctx = currentCtx) {
     rebuildValue();
     r2.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return; // 左のみ
+      // メニュー名の入力欄は自前で armSelectDrag（クリック編集/ドラッグ移動）を
+      // 持つので、ここでは即ドラッグを始めない（始めると編集できなくなる）。
+      if (e.target.closest(".f-menu-name")) return;
       startNodeDrag(e, node.id, ctx);
     });
     // 種別ドロップダウンも掴んでドラッグ移動できる。preventDefault せずに
@@ -3631,6 +3653,10 @@ function snapCandidate(ctx = currentCtx) {
   const drag = ctx.drag;
   if (!drag) return null;
   const p = profile(ctx);
+  // ドラッグ中がメニュー（サブメニュー）ブロックなら、どこにも連結させない
+  // （サブメニューブロックは常に単独で扱う）。
+  const dragNode = nodeById(drag.id, ctx);
+  if (dragNode && (dragNode.type || "key") === "menu") return null;
   const inChain = new Set(drag.chain);
   const myEl = ownOne(ctx, `.anode[data-id="${drag.id}"]`);
   if (!myEl) return null;
@@ -3642,6 +3668,8 @@ function snapCandidate(ctx = currentCtx) {
   p.nodes.forEach((n) => {
     if (inChain.has(n.id)) return;
     if (n.next) return; // 既に下に何か繋がってるノードには積めない
+    // メニュー（サブメニュー）ブロックの下には連結させない。
+    if ((n.type || "key") === "menu") return;
     const el = ownOne(ctx, `.anode[data-id="${n.id}"]`);
     if (!el) return;
     const nb = el.getBoundingClientRect();
