@@ -795,10 +795,7 @@ function renderTabs() {
       if (e.target.closest("button, input")) return;
       if (tabReorderDidMove) return; // 直前が並べ替えドラッグ
       if (i === rootCtx.profileIndex) return;
-      saveCamera(rootCtx, rootCtx.profileIndex); // 今のタブのカメラを保存
-      rootCtx.profileIndex = i;
-      restoreOrResetView(rootCtx, i); // 行き先タブのカメラを復元（無ければリセット）
-      render();
+      switchToTab(i);
     });
     // タブ右クリック → コンテキストメニュー（プロファイルを複製）。
     tab.addEventListener("contextmenu", (e) => {
@@ -844,11 +841,7 @@ function renderTabs() {
         }
       });
       tag.addEventListener("click", () => {
-        if (i === rootCtx.profileIndex) return;
-        saveCamera(rootCtx, rootCtx.profileIndex);
-        rootCtx.profileIndex = i;
-        restoreOrResetView(rootCtx, i);
-        render();
+        switchToTab(i);
       });
       tab.appendChild(tag);
     }
@@ -1347,6 +1340,22 @@ function setupCanvasPanZoom(ctx = currentCtx) {
   });
 }
 
+// タブ（プロファイル）切替の共通処理。タブ操作は常にルート面が対象なので、
+// currentCtx を rootCtx に戻してから root を明示的に再描画する。これをしないと
+// 直前に子パネルへ hover していると currentCtx が子のままで、クリック切替時の
+// render() が子面を描いてしまい「データは切替わったのにプレビューが変わらない」
+// 状態になる（起動直後にこの不整合が起きやすかった）。
+function switchToTab(i) {
+  const profiles = config.profiles || [];
+  if (i < 0 || i >= profiles.length) return;
+  if (i === rootCtx.profileIndex) return;
+  saveCamera(rootCtx, rootCtx.profileIndex);
+  rootCtx.profileIndex = i;
+  restoreOrResetView(rootCtx, i);
+  currentCtx = rootCtx; // 操作対象をルートへ確実に戻す
+  render(rootCtx); // ルート面を明示的に描く
+}
+
 // 右ボタン＋ホイールでタブ（プロファイル）を切り替える。
 let tabWheelGuard = false;
 function switchTabByWheel(dir) {
@@ -1360,11 +1369,7 @@ function switchTabByWheel(dir) {
   let i = rootCtx.profileIndex + dir;
   if (i < 0) i = profiles.length - 1;
   if (i >= profiles.length) i = 0;
-  if (i === rootCtx.profileIndex) return;
-  saveCamera(rootCtx, rootCtx.profileIndex);
-  rootCtx.profileIndex = i;
-  restoreOrResetView(rootCtx, i);
-  render();
+  switchToTab(i);
 }
 
 function onPanMove(e, ctx = currentCtx) {
