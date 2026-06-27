@@ -1,12 +1,19 @@
-# 右くるり (MigiKururi)
-<img width="709" height="474" alt="Animation2" src="https://github.com/user-attachments/assets/214ca3e5-2c37-448c-9a26-1a012858e8ae" />
+# 右くるり (右クリックパイメニューソフト)
+<img width="709" height="474" alt="Animation2" src="https://github.com/user-attachments/assets/214ca3e5-2c37-448c-9a26-1a012858e8ae" />  <br>
+ 
+<img width="330" height="309" alt="image" src="https://github.com/user-attachments/assets/b415ddbd-20e8-42f0-b325-0519defb8641" />
+<img width="266" height="235" alt="image" src="https://github.com/user-attachments/assets/2fbafa9b-d547-4aab-bd3e-9bb85ee44b91" />
+<img width="284" height="238" alt="image" src="https://github.com/user-attachments/assets/be044478-b066-4536-a4ed-96b293612a94" />
 
 
 
 
 
-指定したアプリの右クリックを独自パイメニューにします。
-中心で右クリックを離すと右クリックが作動しますので、奪いません。
+
+## 特徴
+軽快動作！直感的かつ一望できる散らかし放題の設定UI！マジで一瞬でパイメニュー作れます
+<img width="1128" height="817" alt="image" src="https://github.com/user-attachments/assets/f9892069-8fbc-4a64-a436-9f8e511ff5c6" />
+
 
 ## 設定の仕方
 <img width="510" height="270" alt="Animation2" src="https://github.com/user-attachments/assets/b5303436-9fe2-4ecb-8f14-c98323bf8055" />
@@ -21,7 +28,8 @@
 <img width="865" height="750" alt="image" src="https://github.com/user-attachments/assets/f8e676f7-242f-4a81-8d2b-28a963dff03b" />
 
 ## 右クリック+ホイールとかも設定可
-<img width="424" height="193" alt="image" src="https://github.com/user-attachments/assets/cd846e55-e01b-41f8-9aca-59e6210de589" />
+<img width="424" height="193" alt="image" src="https://github.com/user-attachments/assets/cd846e55-e01b-41f8-9aca-59e6210de589" /><br>
+右クリホイールでタブ移動めっちゃ便利だよ
 
 
 
@@ -37,6 +45,7 @@
 [Tauri](https://tauri.app/) 製のネイティブアプリです。
 - **バックエンド**: Rust（低レベルマウスフック / キー送出 / タスクトレイ / 設定の読み書き）
 - **フロントエンド**: Vanilla JS + HTML + CSS（パイメニュー描画・設定エディタ）
+- コーディング Claude Opus4.8(全量)
 
 ## クリスタで使用する時の注意
 このソフトは数ミリ秒で即キーを送れますが、クリスタはそれが反映されるまで4-6Fかかるようです。
