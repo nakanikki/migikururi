@@ -1206,7 +1206,8 @@ fn open_app_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("open folder failed: {e}"))
 }
 
-/// 設定 JSON（config.json）が置かれているフォルダ（AppData 内）を開く。
+/// 設定 JSON（config.json）が実際に置かれているフォルダを開く。
+/// 採用先は config::config_dir（exe 同列優先・不可なら AppData）と一致する。
 #[tauri::command]
 fn open_config_folder(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;

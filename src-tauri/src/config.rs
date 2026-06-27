@@ -430,26 +430,76 @@ fn items_to_segments_nodes(items: &[MenuItem]) -> (Vec<Segment>, Vec<ActionNode>
 }
 
 /// デフォルトプロファイルを生成する。
+// 初回起動の既定プロファイル。「＋追加」で作る新規プロファイル(JS makeProfile)と
+// 同じテンプレートにする: 4分割・鮮やかな色・右セグメント(index1)のみ1配線・
+// 左クリックに1配線・対象アプリ枠1つ・不透明度50%・外側有効/即時アクションON・
+// シェイク離脱/大事OFF。
 fn default_profile() -> Profile {
-    let (segments, nodes) = items_to_segments_nodes(&default_items());
+    // 鮮やかパレット（JS DEFAULT_COLORS と揃える）。
+    let colors = ["#4f8cff", "#28c76f", "#ff9f43", "#ea5455"];
+    let s1_id = "default_s1".to_string();
+    let ql_id = "default_ql".to_string();
+
+    let segments = (0..4)
+        .map(|i| Segment {
+            label: String::new(), // 空＝未設定（接続内容から自動命名）
+            color: colors[i % colors.len()].to_string(),
+            head: if i == 1 { Some(s1_id.clone()) } else { None },
+            custom_color: false,
+        })
+        .collect();
+
+    let nodes = vec![
+        ActionNode {
+            id: s1_id.clone(),
+            kind: "key".into(),
+            value: String::new(),
+            x: 660.0,
+            y: 300.0,
+            next: None,
+            submenu: None,
+            embed_w: None,
+            embed_h: None,
+        },
+        ActionNode {
+            id: ql_id.clone(),
+            kind: "key".into(),
+            value: String::new(),
+            x: 160.0,
+            y: 660.0,
+            next: None,
+            submenu: None,
+            embed_w: None,
+            embed_h: None,
+        },
+    ];
+
+    // 左クリックのクイックスロットだけ ql ノードへ配線。
+    let mut quick_slots = default_quick_slots();
+    for q in quick_slots.iter_mut() {
+        if q.kind == "left" {
+            q.head = Some(ql_id.clone());
+        }
+    }
+
     Profile {
         id: "default".into(),
-        name: "デフォルト".into(),
+        name: String::new(), // 未設定＝対象アプリ名で自動表示
         enabled: true,
         segments,
         nodes,
-        app_nodes: Vec::new(),
-        quick_slots: default_quick_slots(),
+        app_nodes: vec![AppNode { name: String::new(), x: 720.0, y: 560.0, enabled: true }],
+        quick_slots,
         quick_hud_visible: true,
         pie_visible: true,
         outer_r: default_outer_r(),
         inner_r: default_inner_r(),
-            rotation: 0.0,
-        opacity: default_opacity(),
-        outer_active: false,
-        shake_dismiss: true,
+        rotation: 0.0,
+        opacity: 0.5,
+        outer_active: true,
+        shake_dismiss: false,
         protected: false,
-        instant_action: false,
+        instant_action: true,
         items: Vec::new(),
         apps: Vec::new(),
     }
@@ -567,26 +617,57 @@ impl Config {
     }
 }
 
-/// アプリ設定ディレクトリ（config.json が入る親フォルダ）のパス。
-/// 「設定JSONフォルダを開く」リンクで使う。無ければ作成する。
+/// 設定を保存するフォルダ。ポータブル運用のため exe と同じフォルダを優先し、
+/// そこへ書き込めない場合（Program Files 等）は AppData にフォールバックする。
+/// 既に AppData 側に config.json があればそちらを尊重する（移行済み環境を壊さない）。
 pub fn config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = app
+    let appdata = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("config dir error: {e}"))?;
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir error: {e}"))?;
+
+    // exe と同じフォルダ。
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    if let Some(dir) = exe_dir {
+        let exe_cfg = dir.join("config.json");
+        // exe 隣に既に config がある → それを使う（ポータブル運用中）。
+        if exe_cfg.exists() {
+            return Ok(dir);
+        }
+        // AppData 側に既存があるなら、移行済みとみなしそちらを優先（壊さない）。
+        if appdata.join("config.json").exists() {
+            return Ok(appdata);
+        }
+        // どちらも無い（初回）→ exe 隣に書けるか試す。書けるなら exe 隣を採用。
+        if is_writable_dir(&dir) {
+            return Ok(dir);
+        }
     }
-    Ok(dir)
+    // exe 隣に書けない/取得できない → AppData。
+    Ok(appdata)
 }
 
-/// 設定ファイルのパス（アプリ設定ディレクトリ内 config.json）。
+/// フォルダに書き込めるかを、一時ファイルの作成・削除で実地に確認する。
+fn is_writable_dir(dir: &std::path::Path) -> bool {
+    if !dir.exists() {
+        return false;
+    }
+    let probe = dir.join(".migikururi_write_test.tmp");
+    match std::fs::write(&probe, b"") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// 設定ファイルのパス（採用フォルダ内 config.json）。
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("config dir error: {e}"))?;
-    Ok(dir.join("config.json"))
+    Ok(config_dir(app)?.join("config.json"))
 }
 
 /// 設定ファイル(config.json)が既に存在するか。初回起動の判定に使う。

@@ -1681,7 +1681,11 @@ body.tab-dragging {
   font-size: 12px;
 }
 
-/* メニューブロックの「▼横」のサブメニュー名（接続セグメントと連動・編集可）。 */
+/* メニューブロックの「▼横」のサブメニュー名（接続セグメントと連動・編集可）。
+   クリックで編集・ドラッグで移動できるが、カーソルは変えない（要望）。 */
+.anode .f-menu-name {
+  cursor: default;
+}
 .anode .f-menu-name::placeholder {
   color: rgba(255, 255, 255, 0.4);
 }

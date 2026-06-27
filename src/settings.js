@@ -316,18 +316,18 @@ function pvCenter(ctx = currentCtx) {
   return { cx: ctx.pvLeft + PV_R, cy: ctx.pvTop + PV_R };
 }
 
-// 落ち着いたムーテッド（くすみ色）パレット。彩度を抑え明度を揃えた
-// ダスティトーンで上品にまとまる。順序は色相環で隣り合わないように並べ、
-// 円周（最後↔最初も隣）でも同系色が続かないようにしている。
+// 鮮やかでまとまりのあるパレット（パイがカラフルに映える）。順序は色相環で
+// 隣り合わないように並べ、円周（最後↔最初も隣）でも同系色が続かないようにする。
+// セグメント既定色＋カラーピッカーのプリセットの両方で使う。
 const DEFAULT_COLORS = [
-  "#6b8aa6", // くすんだ青
-  "#c9a26b", // サンドベージュ
-  "#7fa07f", // セージグリーン
-  "#b08fa0", // モーブピンク
-  "#6faaa6", // ダスティティール
-  "#c97f7f", // ダスティローズ
-  "#9a85b5", // モーブパープル
-  "#a6a06b", // オリーブ
+  "#4f8cff", // ブルー
+  "#28c76f", // グリーン
+  "#ff9f43", // オレンジ
+  "#ea5455", // レッド
+  "#a66cff", // パープル
+  "#00cfe8", // シアン
+  "#ff6fb5", // ピンク
+  "#f6c324", // イエロー
 ];
 
 // n 分割の i 番目の既定色。固定パレットを順に使い、項目数が色数を
@@ -419,10 +419,10 @@ function newSubmenuData() {
     outer_r: 160,
     inner_r: 56,
     rotation: 0,
-    opacity: 1,
-    outer_active: false,
-    shake_dismiss: true,
-    instant_action: false,
+    opacity: 0.5, // 新規プロファイルと同じ（不透明度 50%）
+    outer_active: true, // 外側有効 ON
+    shake_dismiss: false, // シェイク離脱 OFF
+    instant_action: true, // 即時アクション ON
   };
 }
 
@@ -2524,8 +2524,13 @@ function buildValueEl(node, ctx = currentCtx) {
       input.disabled = true;
       input.title = "セグメントに接続するとサブメニュー名を編集できます";
     }
-    // ドラッグ移動・パン等を誤発動させないように pointerdown は止める。
-    input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    // クリック＝テキスト編集、ドラッグ＝ブロック移動（カーソルは変えない）。
+    // armSelectDrag が「5px 動いたらノードドラッグへ切替・動かなければ素の編集」
+    // を両立してくれる（種別ドロップダウンと同じ仕組み）。
+    input.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return; // 左のみ
+      armSelectDrag(e, node.id, input, ctx);
+    });
     if (seg) {
       const commit = () => {
         seg.label = input.value.trim(); // 空＝自動名（未設定）へ戻す
