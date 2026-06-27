@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="settings.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>右くるり</title>
+    <script type="module" src="/settings.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <!-- プロファイルタブバー（各タブ=1プロファイル、＋で新規） -->
+      <div id="tabbar" class="tabbar"></div>
+
+      <!-- キャンバス: パン/ズーム可能。中身は #world に入れて transform する。
+           ツールバーは UE5 ビューポート風にキャンバス内左上へフローティング。 -->
+      <div id="editor" class="editor">
+        <div id="zoom-indicator" class="zoom-indicator">100%</div>
+
+        <!-- 右上ミニマップ（ナビゲーター）。ルート面のみ。全体の縮小表示＋
+             現在表示範囲の赤枠。クリック/ドラッグでその位置へパン。 -->
+        <div id="minimap" class="minimap">
+          <canvas id="minimap-canvas"></canvas>
+          <div id="minimap-view" class="minimap-view"></div>
+        </div>
+
+        <!-- 通知トースト置き場。新しいトーストは下に積まれる（上書きしない）。 -->
+        <div id="toast-stack" class="toast-stack"></div>
+
+        <!-- 左下フローティングツールバー（項目数・不透明度・外側有効・シェイク離脱） -->
+        <div class="floating-toolbar toolbar-bottom-left">
+          <div class="slider-wrap" id="count-wrap">
+            <input
+              id="count-range"
+              type="range"
+              min="1"
+              max="8"
+              step="1"
+              value="6"
+            />
+            <span class="slider-text">
+              <span class="slider-label">項目数</span>
+              <span id="count-value" class="slider-value">6</span>
+            </span>
+          </div>
+          <div class="slider-wrap" id="opacity-wrap">
+            <input
+              id="opacity-range"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value="100"
+            />
+            <span class="slider-text">
+              <span class="slider-label">不透明度</span>
+              <span id="opacity-value" class="slider-value">100%</span>
+            </span>
+          </div>
+          <!-- 外側有効: 外周より外でもその方向のセグメントを選択扱いに -->
+          <button
+            id="outer-active"
+            class="toggle-btn"
+            type="button"
+            data-tip="外周を超えて選択できるようにする"
+          >
+            外側有効
+          </button>
+          <!-- シェイク離脱: マウスシェイクで表示中のメニューを消す -->
+          <button
+            id="shake-dismiss"
+            class="toggle-btn"
+            type="button"
+            data-tip="マウスを左右に振るとメニューをキャンセルする"
+          >
+            シェイク離脱
+          </button>
+          <!-- 即時アクション: 項目へカーソルを移動しただけで発動を確定する -->
+          <button
+            id="instant-action"
+            class="toggle-btn"
+            type="button"
+            data-tip="項目へカーソルを移動しただけで&#10;即アクションを確定する"
+          >
+            即時アクション
+          </button>
+          <!-- 大事: 保護中はタブの削除ボタンを隠す（タブ名の中クリックでも切替）。
+               一番最後に置く。 -->
+          <button
+            id="protect-toggle"
+            class="toggle-btn"
+            type="button"
+            data-tip="大事なプロファイルを誤って消さないよう保護する"
+          >
+            大事
+          </button>
+          <!-- 有効: オフにするとこのプロファイルは右クリックで無視される。 -->
+          <button
+            id="enable-toggle"
+            class="toggle-btn"
+            type="button"
+            data-tip="オフにするとこのプロファイルは右クリックで無視されます"
+          >
+            有効
+          </button>
+        </div>
+
+        <!-- ブロック追加は「何もない所で右クリック → メニュー」で行う。 -->
+
+        <div id="world" class="world">
+          <svg id="connectors" class="connectors"><!-- コネクタ線 --></svg>
+          <div id="preview" class="preview"><!-- パイSVG --></div>
+          <div id="nodes" class="nodes"><!-- アクションノード群（自由配置） --></div>
+        </div>
+      </div>
+
+      <span id="status" class="status-hidden"></span>
+      <!-- ホバー即表示のカスタムツールチップ（data-tip 要素用） -->
+      <div id="tooltip"></div>
+      <!-- ドラッグ中の移動先を示す矢印オーバーレイ（画面座標で描く） -->
+      <svg id="drag-arrow" class="drag-arrow"></svg>
+    </main>
+  </body>
+</html>
