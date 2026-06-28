@@ -288,6 +288,7 @@ let anchorY = 0;
 const SHAKE_MIN_DX = 18; // この px 以上動いたら1ストロークと見なす（DPR後の物理px）
 const SHAKE_NEEDED = 4; // 必要な方向反転回数（左右左右＝4反転）
 const SHAKE_WINDOW_MS = 700; // 直近この時間内の反転だけ数える
+const SHAKE_REVERSAL_GAP_MS = 300; // 反転がこれ以上空いたら数え直す（速い連続のみ本物）
 let shakeDir = 0; // 直近で確定した水平方向（-1=左, +1=右, 0=未確定）
 let shakeStrokeStartX = 0; // 現ストロークの始点X
 let shakeReversals = []; // 反転が起きた時刻（ミリ秒）の配列
@@ -312,6 +313,13 @@ function detectShake(x) {
   if (dir !== shakeDir) {
     // 方向反転を1回カウント。始点を更新して次ストロークを測る。
     const now = Date.now();
+    // 本物のシェイクは反転が「速く連続」する。前の反転から間が空いていたら
+    // （＝ゆっくりした弧の動きや、イベント間引きで飛んだだけ）шリセットして
+    // 数え直す。これで非フォーカス窓のスパースな move でも誤検出しない。
+    const last = shakeReversals[shakeReversals.length - 1];
+    if (last !== undefined && now - last > SHAKE_REVERSAL_GAP_MS) {
+      shakeReversals = [];
+    }
     shakeReversals.push(now);
     // 古い反転（ウィンドウ外）は捨てる。
     shakeReversals = shakeReversals.filter((t) => now - t <= SHAKE_WINDOW_MS);

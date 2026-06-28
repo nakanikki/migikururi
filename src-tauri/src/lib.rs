@@ -85,6 +85,10 @@ pub(crate) fn try_instant_fire(x: i32, y: i32) -> bool {
         // 別スレッドで即送出（フック外し方式は連続使用で再設置がばらつき遅延を
         // 溜めるため不採用。素直に SendInput する）。
         std::thread::spawn(move || {
+            // 2回目以降、前面が「右くるり」窓に奪われていてキーが自分に届く
+            // 問題があるため、送出直前に対象アプリを前面へ戻す（軽い前面化）。
+            #[cfg(windows)]
+            refocus_target_if_needed();
             send_keys_blocking(&spec);
         });
         return true;
@@ -1031,6 +1035,37 @@ fn select_quick(app: tauri::AppHandle, kind: String) {
     run_stack_fast(&app, stack);
 }
 
+/// 前面が対象アプリでない（＝我々の窓などに奪われている）ときだけ、対象アプリを
+/// 前面へ戻す。即時アクションで毎回 AttachThreadInput を走らせると重いので、
+/// 必要なときだけ実行してレイテンシを抑える。
+#[cfg(windows)]
+fn refocus_target_if_needed() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    let h = crate::mouse_hook::target_hwnd();
+    if h == 0 {
+        return;
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        let target = windows::Win32::Foundation::HWND(h as *mut std::ffi::c_void);
+        if fg == target {
+            return; // 既に対象が前面＝何もしない（軽量パス）
+        }
+        // 前面が対象でない（我々の窓等に奪われている）→ 対象を前面へ戻す。
+        // 対象プロセスが fg と同じなら子窓違いなので戻さなくてよい。
+        let mut fg_pid = 0u32;
+        let mut tg_pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
+        GetWindowThreadProcessId(target, Some(&mut tg_pid));
+        if fg_pid == tg_pid {
+            return; // 同一プロセスの別窓＝そのまま届く
+        }
+    }
+    refocus_target();
+}
+
 /// 対象アプリのウィンドウへ確実にフォーカスを戻す。
 /// 単純な SetForegroundWindow は Windows の前面化ロックで失敗しやすいので、
 /// 現在の前面ウィンドウのスレッドへ AttachThreadInput してから前面化する。
@@ -1414,6 +1449,20 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // パイメニュー窓はフォーカスを奪わない(WS_EX_NOACTIVATE)＝非フォーカス扱いで、
+    // WebView2 が背面ウィンドウのタイマー/レンダリングを間引く。すると gesture-move
+    // が飛び飛びになり、普通に動かしただけでもシェイク誤検知でメニューが消える。
+    // これを防ぐため、バックグラウンド抑制系を全て無効化する（要: 起動前に設定）。
+    #[cfg(windows)]
+    {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-background-timer-throttling \
+             --disable-renderer-backgrounding \
+             --disable-backgrounding-occluded-windows",
+        );
+    }
+
     // ホットキー: F8（動作確認用。衝突しにくい単独キー。後で設定可能にする）
     // 注: Alt+Space は Windows 予約、Ctrl+Alt+Space は IME 等と衝突しうるので避ける。
     tauri::Builder::default()
