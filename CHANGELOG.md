@@ -15,7 +15,8 @@
 
   
 - **除外タブ機能** <br>
-    <img width="236" height="158" alt="image" src="https://github.com/user-attachments/assets/73197cba-66a1-4786-a33d-22ff743f8459" />
+    <img width="350" height="140" alt="image" src="https://github.com/user-attachments/assets/476eb13e-af14-4543-9fe7-4ba5463a7753" />
+
 
 
 - **クイックスロットのラベル**  <br>
