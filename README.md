@@ -1,4 +1,8 @@
-# 右くるり (Win専用右クリックパイメニューソフト)
+# 右くるり (Win専用右クリックパイメニューソフト)<br>
+
+ [Releases](https://github.com/nakanikki/migikururi/releases) [更新履歴](https://github.com/nakanikki/migikururi/blob/main/CHANGELOG.md)<br>
+
+
 <img width="709" height="474" alt="Animation2" src="https://github.com/user-attachments/assets/214ca3e5-2c37-448c-9a26-1a012858e8ae" />  <br>
  
 <img width="330" height="309" alt="image" src="https://github.com/user-attachments/assets/b415ddbd-20e8-42f0-b325-0519defb8641" />
