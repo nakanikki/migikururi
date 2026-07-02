@@ -11,15 +11,15 @@
     <img width="257" height="99" alt="image" src="https://github.com/user-attachments/assets/3d49acde-2fc3-48f4-b2d6-72b245f25eaf" />
 
   - **サブメニューの前段・後段アクション** <br>
-<img width="285" height="161" alt="image" src="https://github.com/user-attachments/assets/6d986ae6-dfe2-477b-851b-159d732e7789" />
+    <img width="285" height="161" alt="image" src="https://github.com/user-attachments/assets/6d986ae6-dfe2-477b-851b-159d732e7789" />
 
   
-- **除外タブ機能 **: <br>
-<img width="236" height="158" alt="image" src="https://github.com/user-attachments/assets/73197cba-66a1-4786-a33d-22ff743f8459" />
+- **除外タブ機能** <br>
+    <img width="236" height="158" alt="image" src="https://github.com/user-attachments/assets/73197cba-66a1-4786-a33d-22ff743f8459" />
 
 
-- **クイックスロットのラベル**:  <br>
-<img width="488" height="189" alt="image" src="https://github.com/user-attachments/assets/b1fe20f0-e534-4d92-85f1-a31a071ecd60" />
+- **クイックスロットのラベル**  <br>
+   <img width="488" height="189" alt="image" src="https://github.com/user-attachments/assets/b1fe20f0-e534-4d92-85f1-a31a071ecd60" />
 
 
 
