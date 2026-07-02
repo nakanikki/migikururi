@@ -1,4 +1,5 @@
 mod config;
+mod hid_out;
 mod mouse_hook;
 
 use config::Config;
@@ -35,6 +36,27 @@ struct InstantPie {
 }
 /// 即時アクションがこのジェスチャで発火済みか（右UP時の二重発火防止）。
 static INSTANT_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// サブメニューの「続き」アクション（スタックでメニューノードより後に積まれた分）。
+/// サブメニューを開くたびに push し、サブメニュー内で項目が発動したら
+/// 内側→外側（LIFO）の順で続きとして実行する。キャンセルで閉じたら捨てる。
+static PENDING_CONTINUATIONS: Mutex<Vec<Vec<Act>>> = Mutex::new(Vec::new());
+
+/// 溜まっている「続き」を取り出して空にする（内側→外側の順に平坦化）。
+fn take_continuations() -> Vec<Act> {
+    let mut lists: Vec<Vec<Act>> =
+        std::mem::take(&mut *PENDING_CONTINUATIONS.lock().unwrap());
+    let mut out = Vec::new();
+    while let Some(l) = lists.pop() {
+        out.extend(l);
+    }
+    out
+}
+
+/// 「続き」を捨てる（キャンセル・新ジェスチャ開始時）。
+fn clear_continuations() {
+    PENDING_CONTINUATIONS.lock().unwrap().clear();
+}
 
 static INSTANT_PIE: Mutex<InstantPie> = Mutex::new(InstantPie {
     active: false,
@@ -298,12 +320,14 @@ pub(crate) fn instant_fired(app: &tauri::AppHandle) {
 pub(crate) fn gesture_release(app: &tauri::AppHandle, x: i32, y: i32, quick_used: bool) {
     // 即時アクションで既に発火済みなら、二重発火しない（見た目だけ閉じる）。
     if INSTANT_FIRED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        release_prepressed(); // 念のため（instant 中は先押ししない＝通常 no-op）
         let h = app.clone();
         std::thread::spawn(move || hide_menu(&h));
         return;
     }
     if quick_used {
         // クイック使用時は発動も右クリック送出もせず閉じるだけ。
+        release_prepressed();
         let h = app.clone();
         std::thread::spawn(move || hide_menu(&h));
         return;
@@ -312,13 +336,30 @@ pub(crate) fn gesture_release(app: &tauri::AppHandle, x: i32, y: i32, quick_used
     // それ以外（中央ハブ＝キャンセル / 範囲外 / 複雑 / 未接続）は実績のある
     // JS 経路（CurrentProfile 使用）にフォールバックして安全側に倒す。
     if let Some(spec) = judge_release_key(x, y) {
-        std::thread::spawn(move || {
-            send_keys_blocking(&spec);
-        });
+        // サブメニュー内での発動なら、親スタックの「続き」も取り出して実行する。
+        let conts = take_continuations();
         let h = app.clone();
-        std::thread::spawn(move || hide_menu(&h));
-    } else if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit("gesture-release", (x, y, quick_used));
+        std::thread::spawn(move || {
+            // カーソル下の窓がフォーカス外（Chrome 2窓の非フォーカス側等）
+            // なら前面へ戻してから送る。send_keys_blocking は押しっぱなし修飾
+            // キー（初期ポートの特殊キー等）を自動で本キーに合体させる（1F パス）。
+            refocus_target_if_needed();
+            send_keys_blocking(&spec);
+            for act in &conts {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                run_one(&h, act);
+            }
+            // 送出後に押しっぱなし修飾キーを解放（送出中は保持＝1F を守る）。
+            release_prepressed();
+            hide_menu(&h);
+        });
+    } else {
+        // 発火しない離し方（ハブ/範囲外/複雑セグメント）。押しっぱなしが残って
+        // いれば解放してから JS 経路へ（ハブ＝本来メニューに Ctrl が混ざる事故を防ぐ）。
+        release_prepressed();
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.emit("gesture-release", (x, y, quick_used));
+        }
     }
 }
 
@@ -326,6 +367,9 @@ pub(crate) fn gesture_release(app: &tauri::AppHandle, x: i32, y: i32, quick_used
 /// 呼ばれる。kind に対応するクイックスロットのアクションを発動する。
 /// メニューは閉じない（右押しっぱなし継続）。
 pub(crate) fn quick_action(app: &tauri::AppHandle, kind: String) {
+    // 先押し中の修飾キーが混ざるとクイックのキーが誤コンボになる
+    // （例: 先押し Ctrl + クイックの "S" → Ctrl+S）。発動前に必ず解放。
+    release_prepressed();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("quick-action", kind);
     }
@@ -393,6 +437,8 @@ fn toggle_menu(app: &tauri::AppHandle) {
     } else {
         // F8 トグル表示はクリックモード（ジェスチャ開始イベントは出さない）。
         // アプリ非紐付けなのでアクティブプロファイルのセグメントを使う。
+        // キー送出先は「今の前面窓」（前回右クリックの窓を引きずらない）。
+        mouse_hook::retarget_foreground();
         let cfg = config::load(app);
         let profile = match cfg.active() {
             Some(p) => p.clone(),
@@ -449,15 +495,45 @@ fn open_submenu(app: tauri::AppHandle, index: usize) {
         return;
     };
     // 現在表示中のパイ（ルート or サブメニュー）から、該当セグメントの
-    // インライン submenu を取り出す。
-    let sub = {
+    // インライン submenu と「メニューより前に積まれたアクション」を取り出す。
+    let (sub, pre): (Option<config::Profile>, Vec<Act>) = {
         let state = app.state::<CurrentProfile>();
         let guard = state.0.lock().unwrap();
-        guard.as_ref().and_then(|p| p.segment_submenu(index))
+        match guard.as_ref() {
+            Some(p) => (
+                p.segment_submenu(index),
+                p.segment_pre_menu_actions(index)
+                    .iter()
+                    .map(|n| Act::from_node(n))
+                    .collect(),
+            ),
+            None => (None, Vec::new()),
+        }
     };
     let Some(sub) = sub else {
         return;
     };
+    // サブメニューを開く前に前段アクションを実行する（例: 特殊キー(Ctrl離す)→
+    // メニュー なら、このサブメニューに入る瞬間に Ctrl を離す）。
+    for act in &pre {
+        run_one(&app, act);
+    }
+    // メニューより後に積まれたアクションは「続き」として保存し、サブメニュー内で
+    // 項目が発動した後に実行する（キャンセルで閉じたら捨てる）。
+    let post: Vec<Act> = {
+        let state = app.state::<CurrentProfile>();
+        let guard = state.0.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|p| {
+                p.segment_post_menu_actions(index)
+                    .iter()
+                    .map(|n| Act::from_node(n))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    PENDING_CONTINUATIONS.lock().unwrap().push(post);
     // 表示中パイをこのサブメニューへ切り替え（発動時のスタック解決先になる）。
     {
         let state = app.state::<CurrentProfile>();
@@ -513,6 +589,23 @@ fn show_menu(app: &tauri::AppHandle, profile: &config::Profile) -> Option<(i32, 
     {
         let state = app.state::<CurrentProfile>();
         *state.0.lock().unwrap() = Some(profile.clone());
+    }
+
+    // 初期アクション（初期ポートに接続されたスタック）をパイ表示の瞬間に実行する。
+    // 主用途は「特殊キー(Ctrl 押す)」で、ここで押しっぱなしにしておくと、方向を
+    // 決めている間に修飾キー処理が進み、離してキーを送る頃には 1F で反映される。
+    // 前ジェスチャの押し残し・続きがあれば先に始末してから開始（安全網）。
+    release_prepressed();
+    clear_continuations();
+    if let Some(head) = profile.initial_head.as_ref() {
+        let stack: Vec<Act> = profile
+            .stack_from(head)
+            .iter()
+            .map(|n| Act::from_node(n))
+            .collect();
+        for act in &stack {
+            run_one(app, act);
+        }
     }
 
     emit_pie(&window, profile);
@@ -591,6 +684,10 @@ fn set_instant_pie(profile: &config::Profile, anchor: Option<(i32, i32)>, dpr: f
 
 /// メニューを隠す。閉路は必ずここを通す。
 fn hide_menu(app: &tauri::AppHandle) {
+    // 先押し修飾キー・サブメニューの続きの取りこぼし防止の最終網
+    // （発火経路は既に同期取得済みなので、ここに残っているのはキャンセル系のみ）。
+    release_prepressed();
+    clear_continuations();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
@@ -734,8 +831,15 @@ static ENIGO: Mutex<Option<enigo::Enigo>> = Mutex::new(None);
 /// キー送出を同期実行する（呼び出しスレッドをブロックする）。スタック実行で
 /// 複数キーを順番に送るため、各送出の完了を待てる同期版にする。
 fn send_keys_blocking(spec: &str) {
+    // 【作者専用・隠し機能】config の hid_port が設定されていれば、まず
+    // Pro Micro（本物 HID キーボード）経由で送る。クリスタ等の注入遅延
+    // （SendInput 5-6F）を回避して 2F にできる。ハード必須なので配布版
+    // （hid_port 未設定）では使われず、従来どおり SendInput にフォールバック。
     #[cfg(windows)]
     {
+        if hid_out::try_send_configured(spec) {
+            return;
+        }
         send_keys_native(spec);
     }
     #[cfg(not(windows))]
@@ -870,31 +974,14 @@ fn spec_to_vks(spec: &str) -> (Vec<u16>, Option<u16>, Option<char>) {
 #[cfg(windows)]
 fn send_keys_native(spec: &str) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
-        VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, VIRTUAL_KEY,
     };
 
     let (mods, main_vk, main_ch) = spec_to_vks(spec);
 
-    // VK → スキャンコード。
-    let scan = |vk: u16| -> u16 { unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 } };
-
-    // 押す/離すイベント。**VK と scancode を両方** 入れる（SCANCODE フラグは
-    // 立てない）。これでメッセージ系(VK 読み)と RawInput/DirectInput 系
-    // (scancode 読み)の双方が満たされ、アプリの採用率が最大になる（調査結果）。
-    let mk_sc = |vk: u16, up: bool| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: scan(vk),
-                dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
+    // 押す/離すイベント（スキャンコード主体）。実体は key_input() を参照。
+    let mk_sc = key_input;
     // Unicode 文字用（記号など、scancode で表せないもの）。
     let mk_uni = |ch: u16, up: bool| INPUT {
         r#type: INPUT_KEYBOARD,
@@ -913,12 +1000,20 @@ fn send_keys_native(spec: &str) {
         },
     };
 
+    // 押しっぱなし中の修飾キーは再度 press/release しない（押したまま本キーに
+    // 合体させる＝クリスタ遅延対策の 1F パス）。held に含まれない修飾キーだけ
+    // 自前で押して離す。
+    let held = prepressed_snapshot();
+
     // 押す群と離す群を「別々の SendInput」で送る。同一バッチで down+up を
     // 一瞬に送るとアプリが取りこぼし/遅延処理することがあるため、ハードウェアの
     // 「押す→離す」に近づける（2回に分ける）。
     let mut down: Vec<INPUT> = Vec::new();
     let mut up: Vec<INPUT> = Vec::new();
     for &m in &mods {
+        if held.contains(&m) {
+            continue; // 既に押しっぱなし
+        }
         down.push(mk_sc(m, false));
     }
     if let Some(vk) = main_vk {
@@ -932,6 +1027,9 @@ fn send_keys_native(spec: &str) {
         }
     }
     for &m in mods.iter().rev() {
+        if held.contains(&m) {
+            continue; // 押しっぱなしは解放しない（ジェスチャ完了時にまとめて解放）
+        }
         up.push(mk_sc(m, true));
     }
 
@@ -973,6 +1071,24 @@ fn send_keys_enigo(spec: &str) {
 struct Act {
     kind: String,
     value: String,
+    /// special 用: 押す/離す対象の修飾キー。
+    mods: Vec<String>,
+    /// special 用: 送るクリック。
+    clicks: Vec<String>,
+    /// special 用: true=離す / false=押す。
+    release: bool,
+}
+
+impl Act {
+    fn from_node(n: &config::ActionNode) -> Act {
+        Act {
+            kind: n.kind.clone(),
+            value: n.value.clone(),
+            mods: n.mods.clone(),
+            clicks: n.clicks.clone(),
+            release: n.release,
+        }
+    }
 }
 
 /// フロントのセグメント選択時に呼ばれる。表示中プロファイルの segment[index]
@@ -990,19 +1106,19 @@ fn select_segment(app: tauri::AppHandle, index: usize) {
         hide_menu(&app);
         return;
     };
-    let stack: Vec<Act> = profile
+    let mut stack: Vec<Act> = profile
         .stack_for_segment(index)
         .iter()
-        .map(|n| Act {
-            kind: n.kind.clone(),
-            value: n.value.clone(),
-        })
+        .map(|n| Act::from_node(n))
         .collect();
 
     if stack.is_empty() {
         hide_menu(&app);
         return; // 未接続セグメント＝何もしない
     }
+    // サブメニューの「続き」（親スタックでメニューより後のアクション）を末尾に
+    // 連結して一気に実行する（内側→外側の順）。ルート発動時は空。
+    stack.extend(take_continuations());
     run_stack_fast(&app, stack);
     // 窓 hide は送出経路をブロックしないよう「送出後・別スレッド」で。
     // 見た目はフロントが既に visibility:hidden で消しているので遅延しても無害。
@@ -1023,26 +1139,31 @@ fn select_quick(app: tauri::AppHandle, kind: String) {
     let stack: Vec<Act> = profile
         .stack_for_quick(&kind)
         .iter()
-        .map(|n| Act {
-            kind: n.kind.clone(),
-            value: n.value.clone(),
-        })
+        .map(|n| Act::from_node(n))
         .collect();
     if stack.is_empty() {
         return; // 未接続スロット＝何もしない
     }
-    // NOACTIVATE で対象アプリが前面のまま＝refocus 不要。先頭は即同期送出。
+    // 前面化は run_stack_fast 側で必要時のみ行う（カーソル下の窓が
+    // フォーカス外＝Chrome 2窓の非フォーカス側などのケース）。先頭は即同期送出。
     run_stack_fast(&app, stack);
 }
 
-/// 前面が対象アプリでない（＝我々の窓などに奪われている）ときだけ、対象アプリを
-/// 前面へ戻す。即時アクションで毎回 AttachThreadInput を走らせると重いので、
-/// 必要なときだけ実行してレイテンシを抑える。
+/// 前面が「右クリックしたカーソル下の窓」でないときだけ、その窓を前面へ戻す。
+/// 即時アクションで毎回 AttachThreadInput を走らせると重いので、必要なとき
+/// だけ実行してレイテンシを抑える。
+/// 注意: 同一プロセスの別窓でも前面化は必要（Chrome 2窓で片方にフォーカスが
+/// あるとき、キーはフォーカス側のタブに効いてしまう。「そのまま届く」は誤り）。
 #[cfg(windows)]
 fn refocus_target_if_needed() {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    // HID（Pro Micro）送出時は前面化しない。物理キーボード入力はフォーカス
+    // 窓へそのまま届くので不要で、AttachThreadInput/SetForegroundWindow の
+    // コストだけが乗る（遅延源）。作者環境（単一窓＝クリスタ等）では常に
+    // 対象が前面なので実害なし。
+    if hid_out::is_enabled() {
+        return;
+    }
     let h = crate::mouse_hook::target_hwnd();
     if h == 0 {
         return;
@@ -1053,18 +1174,11 @@ fn refocus_target_if_needed() {
         if fg == target {
             return; // 既に対象が前面＝何もしない（軽量パス）
         }
-        // 前面が対象でない（我々の窓等に奪われている）→ 対象を前面へ戻す。
-        // 対象プロセスが fg と同じなら子窓違いなので戻さなくてよい。
-        let mut fg_pid = 0u32;
-        let mut tg_pid = 0u32;
-        GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-        GetWindowThreadProcessId(target, Some(&mut tg_pid));
-        if fg_pid == tg_pid {
-            return; // 同一プロセスの別窓＝そのまま届く
-        }
     }
     refocus_target();
 }
+#[cfg(not(windows))]
+fn refocus_target_if_needed() {}
 
 /// 対象アプリのウィンドウへ確実にフォーカスを戻す。
 /// 単純な SetForegroundWindow は Windows の前面化ロックで失敗しやすいので、
@@ -1107,7 +1221,8 @@ fn refocus_target() {
 #[cfg(not(windows))]
 fn refocus_target() {}
 
-/// 1つのアクションを実行する（key=送出 / launch=起動 / settings=設定窓 / menu=無視）。
+/// 1つのアクションを実行する（key=送出 / launch=起動 / settings=設定窓 /
+/// special=修飾キー押す/離す＋クリック / menu=無視）。
 fn run_one(app: &tauri::AppHandle, act: &Act) {
     match act.kind.as_str() {
         "key" => send_keys_blocking(&act.value),
@@ -1116,8 +1231,108 @@ fn run_one(app: &tauri::AppHandle, act: &Act) {
             let h = app.clone();
             let _ = app.run_on_main_thread(move || open_settings_window(&h));
         }
+        "special" => {
+            #[cfg(windows)]
+            run_special(act);
+        }
         "menu" => {}
         other => eprintln!("[piemenu] unknown action kind: {other}"),
+    }
+}
+
+/// 特殊キー: release=false なら修飾キーを押して押しっぱなし（PREPRESSED_MODS へ
+/// 登録）＋クリックを送る。release=true なら該当修飾キーを離す。
+/// 押しっぱなしの修飾キーはジェスチャ完了時（release_prepressed）に必ず解放される。
+#[cfg(windows)]
+fn run_special(act: &Act) {
+    use windows::Win32::UI::Input::KeyboardAndMouse as k;
+    let mod_vk = |name: &str| -> Option<u16> {
+        match name.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => Some(k::VK_CONTROL.0),
+            "shift" => Some(k::VK_SHIFT.0),
+            "alt" => Some(k::VK_MENU.0),
+            "space" | "スペース" => Some(k::VK_SPACE.0),
+            _ => None,
+        }
+    };
+    let vks: Vec<u16> = act.mods.iter().filter_map(|m| mod_vk(m)).collect();
+
+    if act.release {
+        // 「離す」= 実際に押しっぱなし中の修飾キーだけを離す。
+        // 押していない修飾キーに KEYUP を送ると、ペンタブ等のドライバの入力
+        // 状態を壊して入力が固まる（マウス移動で復活）不具合が出るため、
+        // PREPRESSED_MODS に載っているものだけ対象にする。
+        let mut cur = PREPRESSED_MODS.lock().unwrap();
+        let to_release: Vec<u16> = vks.iter().copied().filter(|v| cur.contains(v)).collect();
+        cur.retain(|m| !to_release.contains(m));
+        drop(cur);
+        eprintln!("[piemenu][mods] special release 要求={vks:04x?} 実解放={to_release:04x?}");
+        release_mods_masked(&to_release); // 空なら no-op
+        return;
+    }
+    eprintln!("[piemenu][mods] special press {vks:04x?} clicks={:?}", act.clicks);
+
+    // 押す（押しっぱなし）。既に押している分は二重に送らない。
+    {
+        let mut cur = PREPRESSED_MODS.lock().unwrap();
+        let downs: Vec<_> = vks
+            .iter()
+            .filter(|v| !cur.contains(v))
+            .map(|&v| key_input(v, false))
+            .collect();
+        for &v in &vks {
+            if !cur.contains(&v) {
+                cur.push(v);
+            }
+        }
+        drop(cur);
+        send_inputs(&downs);
+    }
+    // クリック送出（押すモードのみ）。
+    for c in &act.clicks {
+        send_click(c);
+    }
+}
+
+/// クリックを1回送る（"left"/"middle"/"right"/"wheel"）。
+#[cfg(windows)]
+fn send_click(kind: &str) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, MOUSEEVENTF_LEFTDOWN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSE_EVENT_FLAGS,
+    };
+    let mk = |flags: MOUSE_EVENT_FLAGS, data: i32| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: data as u32,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let evs: Vec<INPUT> = match kind.to_ascii_lowercase().as_str() {
+        "left" => vec![
+            mk(MOUSEEVENTF_LEFTDOWN, 0),
+            mk(MOUSEEVENTF_LEFTUP, 0),
+        ],
+        "middle" => vec![
+            mk(MOUSEEVENTF_MIDDLEDOWN, 0),
+            mk(MOUSEEVENTF_MIDDLEUP, 0),
+        ],
+        "right" => vec![
+            mk(MOUSEEVENTF_RIGHTDOWN, 0),
+            mk(MOUSEEVENTF_RIGHTUP, 0),
+        ],
+        "wheel" => vec![mk(MOUSEEVENTF_WHEEL, 120)], // 1ノッチ上
+        _ => return,
+    };
+    unsafe {
+        SendInput(&evs, std::mem::size_of::<INPUT>() as i32);
     }
 }
 
@@ -1127,6 +1342,10 @@ fn run_one(app: &tauri::AppHandle, act: &Act) {
 fn run_stack_fast(app: &tauri::AppHandle, stack: Vec<Act>) {
     let mut it = stack.into_iter();
     let Some(first) = it.next() else { return };
+    // キーは「右クリックしたカーソル下の窓」に届けたい。フォーカスが別窓
+    // （例: Chrome 2窓の非フォーカス側で右クリ）ならまず前面へ戻す。
+    // 前面が既に対象なら何もしない軽量パス。
+    refocus_target_if_needed();
     run_one(app, &first); // 先頭＝最速で送る
     let rest: Vec<Act> = it.collect();
     if rest.is_empty() {
@@ -1173,6 +1392,7 @@ fn close_menu(app: tauri::AppHandle) {
 /// 対象アプリにコンテキストメニューを出させないようフックへ通知する。
 #[tauri::command]
 fn shake_dismiss(_app: tauri::AppHandle) {
+    release_prepressed(); // シェイク離脱＝発火しない終わり方
     #[cfg(windows)]
     mouse_hook::mark_shake_dismissed();
 }
@@ -1182,6 +1402,9 @@ fn shake_dismiss(_app: tauri::AppHandle) {
 /// 合成右クリックを送る。フックを1回素通しさせて自分のフックに食われるのを防ぐ。
 #[tauri::command]
 fn cancel_to_context_menu(app: tauri::AppHandle) {
+    // 先押し Ctrl 等が残ったまま合成右クリックすると「Ctrl+右クリック」に
+    // なってしまう（クリスタでは別の意味）。必ず先に解放する。
+    release_prepressed();
     hide_menu(&app);
     // 右クリックは対象ウィンドウ（カーソル下）へ。フォーカスを戻してから合成。
     refocus_target();
@@ -1218,6 +1441,147 @@ fn synth_right_click() {
 #[cfg(not(windows))]
 fn synth_right_click() {}
 
+
+/// 1キーぶんの SendInput イベントを作る。**スキャンコード主体**
+/// （KEYEVENTF_SCANCODE）で送る。物理キーボードと同じ形になり、VK は
+/// システムがスキャンコードから導出する。旧実装は「VK+scan 両埋め・
+/// フラグ無し」だったが、クリスタで実測して SCANCODE 方式のほうが約1F
+/// 速かった（VK ~6F / SCANCODE ~5F、2026-07-02）。
+/// 矢印・Del 等の拡張キーは E0 プレフィクス＝KEYEVENTF_EXTENDEDKEY が必要
+/// （付けないと NumLock 依存のテンキー側キーとして解釈される）。
+#[cfg(windows)]
+fn key_input(
+    vk: u16,
+    up: bool,
+) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        MapVirtualKeyW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX,
+        VIRTUAL_KEY,
+    };
+    let ex = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC_EX) };
+    let mut flags = if up {
+        KEYEVENTF_KEYUP
+    } else {
+        KEYBD_EVENT_FLAGS(0)
+    };
+    let mut wvk = 0u16;
+    let mut wscan = (ex & 0xff) as u16;
+    if ex == 0 {
+        // スキャンコードに対応しない VK（稀）は旧来の VK 方式で送る。
+        wvk = vk;
+        wscan = 0;
+    } else {
+        flags |= KEYEVENTF_SCANCODE;
+        if (ex & 0xff00) == 0xe000 || (ex & 0xff00) == 0xe100 {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(wvk),
+                wScan: wscan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// INPUT 群を1回の SendInput で送る。
+#[cfg(windows)]
+fn send_inputs(events: &[windows::Win32::UI::Input::KeyboardAndMouse::INPUT]) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, KEYEVENTF_KEYUP};
+    if events.is_empty() {
+        return;
+    }
+    // 【診断ログ・ペンタブ固まり調査】何をいつ送ったかを全部残す。
+    for ev in events {
+        unsafe {
+            let ki = &ev.Anonymous.ki;
+            let dir = if (ki.dwFlags & KEYEVENTF_KEYUP).0 != 0 { "UP" } else { "DOWN" };
+            eprintln!(
+                "[piemenu][send] vk={:#04x} scan={:#04x} {} flags={:#06x}",
+                ki.wVk.0, ki.wScan, dir, ki.dwFlags.0
+            );
+        }
+    }
+    unsafe {
+        SendInput(events, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+// ── 修飾キー押しっぱなし（クリスタ遅延対策の本命・2026-07-02 実証） ──────────
+// クリスタ等は「修飾キーと本キーが同時（バースト）に届く」と本キーの反映が
+// 3〜5F 遅れる（修飾キー押下で始まる内部処理に本キーが巻き込まれる）。
+// 修飾キーを先に押して十分間を空けてから本キーを送ると本キーは 1F で反映される。
+// そこで「特殊キー(押す)」を初期ポート（パイ表示の瞬間）に繋ぐと、方向を決めて
+// いる間（人間の操作で自然に 100ms 超）に修飾キーが先行し、離してキーを送る頃
+// には処理が済んでいて 1F になる。
+//
+// PREPRESSED_MODS に「今押しっぱなしの修飾キー VK」を持つ。send_keys_native は
+// この集合にある修飾キーを再度 press/release せず（＝押しっぱなしのまま本キーに
+// 合体させる）。ジェスチャ完了・キャンセル時は必ず release_prepressed で解放。
+//
+// 安全設計:
+// - 発火しない終わり方（ハブ/範囲外/シェイク/クイック使用/窓 hide）では必ず解放。
+// - Alt/Win を本キー無しで解放するとメニュー/スタートが開くため、Ctrl 空打ちを
+//   挟んでマスクする（AutoHotkey と同じ手法）。
+
+/// いま押しっぱなし中の修飾キー VK 群。
+#[cfg(windows)]
+static PREPRESSED_MODS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+/// 現在押しっぱなしの修飾キー VK のスナップショット（send_keys_native が参照）。
+#[cfg(windows)]
+fn prepressed_snapshot() -> Vec<u16> {
+    PREPRESSED_MODS.lock().unwrap().clone()
+}
+
+/// 押しっぱなし分をすべて解放する（ジェスチャ完了・キャンセル経路用）。
+#[cfg(windows)]
+fn release_prepressed() {
+    let mods: Vec<u16> = std::mem::take(&mut *PREPRESSED_MODS.lock().unwrap());
+    if !mods.is_empty() {
+        eprintln!("[piemenu][mods] release_prepressed {mods:04x?}");
+    }
+    release_mods_masked(&mods);
+}
+#[cfg(not(windows))]
+fn release_prepressed() {}
+
+/// 修飾キー群を「本キー無しで」解放する。Alt/Win 単独の press→release は
+/// OS がメニュー/スタートを開くため、Ctrl 空打ちを挟んで無効化する。
+/// Ctrl も一緒に解放する場合は「Alt/Win を先に、Ctrl を最後に」離せば
+/// 自然にマスクされる。
+#[cfg(windows)]
+fn release_mods_masked(mods: &[u16]) {
+    use windows::Win32::UI::Input::KeyboardAndMouse as k;
+    if mods.is_empty() {
+        return;
+    }
+    let vk_ctrl = k::VK_CONTROL.0;
+    let has_altwin = mods
+        .iter()
+        .any(|&m| m == k::VK_MENU.0 || m == k::VK_LWIN.0);
+    let has_ctrl = mods.contains(&vk_ctrl);
+    let mut ev = Vec::new();
+    if has_altwin && !has_ctrl {
+        // Alt/Win がまだ押下中のうちに Ctrl を空打ち → 単独押しと見なされない。
+        ev.push(key_input(vk_ctrl, false));
+        ev.push(key_input(vk_ctrl, true));
+    }
+    // Alt/Win → その他 → Ctrl の順で離す（Ctrl 保持中の Alt 解放はマスク不要）。
+    let mut sorted: Vec<u16> = mods.to_vec();
+    sorted.sort_by_key(|&m| if m == vk_ctrl { 1 } else { 0 });
+    for m in sorted {
+        ev.push(key_input(m, true));
+    }
+    send_inputs(&ev);
+}
 
 /// 設定エディタ窓を開く（パイメニューは閉じる）。
 #[tauri::command]
@@ -1264,7 +1628,9 @@ fn save_config(app: tauri::AppHandle, config: Config) -> Result<(), String> {
     config::save(&app, &config)?;
     apply_hotkey(&app, &config.hotkey);
     // 全プロファイル（有効なもの）の所属アプリを乗っ取り対象にする。
-    mouse_hook::set_target_apps(config.all_target_apps());
+    mouse_hook::set_target_apps(config.hook_targets());
+    // 作者専用: Pro Micro 送出ポートを反映（隠しフラグ hid_port）。
+    hid_out::set_port(&config.hid_port);
     // パイメニュー窓へ「設定が変わった」イベントを送り、再描画させる。
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("config-updated", ());
@@ -1294,6 +1660,22 @@ fn foreground_app() -> Option<String> {
         return None;
     }
     Some(name)
+}
+
+/// 設定UIの「最前面ウィンドウのタイトルを取得」用（除外タブ設定）。
+/// piemenu 自身（設定窓）が前面のときは None。
+#[tauri::command]
+fn foreground_window_title() -> Option<String> {
+    // 自分自身のタイトルを拾わないよう、前面アプリが自分なら除外する。
+    let own = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()));
+    if let (Some(own), Some(fg)) = (own, mouse_hook::current_foreground_app()) {
+        if fg == own {
+            return None;
+        }
+    }
+    mouse_hook::current_foreground_title().filter(|t| !t.trim().is_empty())
 }
 
 /// アプリを終了する（トレイメニューから使用）。
@@ -1522,7 +1904,9 @@ pub fn run() {
 
             // 低レベルマウスフックを開始（対象アプリ上の右クリックでパイメニュー）。
             mouse_hook::start(handle.clone());
-            mouse_hook::set_target_apps(cfg.all_target_apps());
+            mouse_hook::set_target_apps(cfg.hook_targets());
+            // 作者専用: Pro Micro 送出ポートを反映（隠しフラグ hid_port）。
+            hid_out::set_port(&cfg.hid_port);
 
             // exe を起動したら（トレイに居るだけだと気付けないので）設定窓を開く。
             // 既に起動中に2個目を起動した場合も single-instance 側で設定窓を出す。
@@ -1541,6 +1925,7 @@ pub fn run() {
             get_config,
             save_config,
             foreground_app,
+            foreground_window_title,
             cancel_to_context_menu,
             quit_app
         ])

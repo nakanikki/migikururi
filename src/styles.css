@@ -30,8 +30,8 @@ body {
   bottom: 24px;
   display: none;
   align-items: center;
-  gap: 14px;
-  padding: 12px 16px;
+  gap: 10px;
+  padding: 10px 12px;
   background: rgba(20, 20, 28, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
@@ -49,13 +49,14 @@ body {
 .qh-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   font-size: 13px;
   color: #eaeaf0;
 }
 .qh-name {
+  /* 4つの名前（左クリック等）は全て同じ文字数なので固定幅にしなくても
+     列が揃う。固定幅(76px)だと右側に余白ができるのでやめた。 */
   flex: 0 0 auto;
-  width: 76px;
   font-weight: 700;
   color: #cfcfe0;
 }

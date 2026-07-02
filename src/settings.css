@@ -190,9 +190,8 @@ main {
   filter: drop-shadow(0 0 4px rgba(79, 140, 255, 0.6));
 }
 
-/* タブ並べ替えドラッグ中はテキスト選択を抑止＆掴みカーソル。 */
+/* タブ並べ替えドラッグ中はテキスト選択を抑止（掴みカーソルは使わない）。 */
 body.tab-dragging {
-  cursor: grabbing;
   user-select: none;
 }
 /* 並べ替えのドロップ先候補タブ。 */
@@ -852,6 +851,11 @@ body.tab-dragging {
   color: #fff;
   outline: none;
   z-index: 5;
+  /* textarea 化（改行対応）に伴う調整。rows で高さ追従するので固定しない。 */
+  resize: none;
+  overflow: hidden;
+  line-height: 1.3;
+  font-family: inherit;
 }
 
 .pv-hub {
@@ -1441,13 +1445,10 @@ body.tab-dragging {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
   pointer-events: auto;
   user-select: none;
-  cursor: grab;
+  cursor: default; /* 掴み移動カーソルは使わない */
   color: #eaeaf0;
   white-space: nowrap;
   overflow: visible; /* ◯がパネル外（右）にはみ出すため */
-}
-.qpanel:active {
-  cursor: grabbing;
 }
 /* マウス絵＋4行を横並びにする本体。 */
 .qpanel-body {
@@ -1496,6 +1497,39 @@ body.tab-dragging {
   font-weight: 700;
   color: #cfcfe0;
 }
+/* 手動ラベル（本番 HUD に出す名前）。クリックで編集。既定名(auto)は薄く。 */
+.qpanel-row .qslot-label {
+  flex: 0 0 auto;
+  max-width: 90px;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #eaeaf0;
+  cursor: text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qpanel-row .qslot-label.auto {
+  color: rgba(255, 255, 255, 0.4);
+}
+.qpanel-row .qslot-label:hover {
+  border-color: rgba(79, 140, 255, 0.6);
+}
+.qpanel-row .qslot-label-edit {
+  flex: 0 0 auto;
+  width: 72px;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #1a1a22;
+  border: 1px solid #4f8cff;
+  color: #fff;
+  outline: none;
+}
+
 /* 行右端の接続ポート（◯）。パネルの外（右）に飛び出して配置。
    ここからノードへドラッグ、またはノードの◯をここへ落として配線。 */
 .qpanel-row .qslot-port {
@@ -1528,11 +1562,147 @@ body.tab-dragging {
   border-radius: 5px;
 }
 
-/* 対象アプリのパネル（キャンバスに自由配置・1行・マージン詰め） */
-.app-node {
+/* 初期アクションパネル（ルート面のみ・マウスパネル風の1行＋◯ポート）。 */
+.initial-panel {
   position: absolute;
   display: flex;
   align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: #2b2838;
+  border: 1px solid rgba(201, 162, 255, 0.45);
+  border-radius: 10px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  user-select: none;
+  cursor: default; /* 掴み移動カーソルは使わない（どこを指すか分かりにくいため） */
+  color: #eaeaf0;
+}
+.initial-panel .initial-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: #d9c7ff;
+  padding-right: 6px; /* ◯が右にはみ出すぶんの余白 */
+}
+/* 初期パネルの◯（丸のスタイルは .qpanel-row .qslot-port に依存しないよう自前で
+   持つ）。色は紫系＝初期アクション配線と合わせる。 */
+.initial-panel .initial-port {
+  position: relative;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4a4160;
+  border: 2px solid #1c1c24;
+  box-shadow: 0 0 0 1px rgba(201, 162, 255, 0.5);
+  cursor: crosshair;
+}
+.initial-panel .initial-port.linked {
+  background: #c9a2ff;
+}
+.initial-panel .initial-port:hover {
+  box-shadow: 0 0 0 2px #fff;
+}
+
+/* 特殊キー編集ポップオーバー（ワコム風）。body 直下に絶対配置。 */
+.special-pop {
+  position: fixed;
+  z-index: 9999;
+  min-width: 300px;
+  padding: 14px 16px;
+  background: #20222b;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+  color: #eaeaf0;
+  user-select: none;
+}
+.special-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.special-desc {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+.special-cols {
+  display: flex;
+  gap: 26px;
+}
+.special-col {
+  flex: 1;
+}
+.special-col-h {
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.5);
+  margin-bottom: 6px;
+}
+.special-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+.special-item input {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+.special-mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+.special-mode-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.5);
+}
+/* セグメント型スイッチ: 2ボタンが1つの枠に収まり、選択側だけ点灯。
+   「発動ボタン」ではなく「今どちらのモードか」を表す見た目。 */
+.special-seg {
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.25);
+}
+.special-seg-btn {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 14px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  border: none;
+  cursor: pointer;
+}
+.special-seg-btn + .special-seg-btn {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+}
+/* 押すモード時は「押す」側を青、離すモード時は「離す」側を橙で点灯。 */
+.special-seg:not(.is-release) .seg-press {
+  background: #4f8cff;
+  color: #fff;
+}
+.special-seg.is-release .seg-release {
+  background: #e0894f;
+  color: #fff;
+}
+
+/* 対象アプリのパネル（キャンバスに自由配置・マージン詰め）。
+   1行目=アプリ名＋トグル＋除外追加、以降に除外タブ行が縦に並ぶ。 */
+.app-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 3px;
   padding: 3px;
   background: #2b3a2e;
@@ -1543,6 +1713,11 @@ body.tab-dragging {
   user-select: none;
   /* ドラッグで移動できるが、カーソルは変えない（要望）。 */
   cursor: default;
+}
+.app-node .app-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
 }
 /* 無効アプリ：うっすら表示（右クリック対象から外れている目印）。 */
 .app-node.is-disabled {
@@ -1593,6 +1768,64 @@ body.tab-dragging {
   background: #2c3140;
 }
 
+/* 除外タブ追加ボタン（タイトル一部一致で乗っ取り無効）。控えめな赤系。 */
+.app-node .app-exclude-add {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(224, 133, 133, 0.14);
+  color: #e08585;
+  border: 1px solid rgba(224, 133, 133, 0.45);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.app-node .app-exclude-add:hover {
+  background: rgba(224, 133, 133, 0.28);
+}
+
+/* 除外タブの1行（🚫 + タイトル一部の入力 + 削除）。 */
+.app-exclude-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.app-exclude-mark {
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.8;
+}
+.app-exclude-row input {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  background: #232733;
+  color: #eaeaf0;
+  border: 1px solid rgba(224, 133, 133, 0.3);
+  border-radius: 5px;
+  padding: 3px 6px;
+}
+.app-exclude-row input:focus {
+  outline: none;
+  border-color: rgba(224, 133, 133, 0.6);
+}
+.app-exclude-del {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+}
+.app-exclude-del:hover {
+  background: rgba(255, 100, 100, 0.2);
+  color: #ff9a9a;
+}
+
 /* ノード左端の接続ポート（◯）。ここからドラッグして配線。
    接続/未接続で見た目を統一（塗り○＋濃い縁取り＋白リング）。 */
 .anode-port {
@@ -1625,12 +1858,12 @@ body.tab-dragging {
 
 .anode .f-type {
   flex: 0 0 auto;
-  width: 52px;
+  width: 74px;
   background: #232733;
   color: #eaeaf0;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
-  padding: 2px 2px;
+  padding: 2px 4px;
   font-size: 11px;
   cursor: pointer;
 }
@@ -1736,7 +1969,7 @@ body.tab-dragging {
 }
 
 .drag-handle {
-  cursor: grab;
+  cursor: default;
   color: rgba(255, 255, 255, 0.35);
   font-size: 16px;
   letter-spacing: -3px;
@@ -1745,7 +1978,7 @@ body.tab-dragging {
 }
 
 .drag-handle:active {
-  cursor: grabbing;
+  cursor: default;
 }
 
 .item-row input[type="color"] {

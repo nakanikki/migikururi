@@ -431,10 +431,10 @@ function defaultQuickSlots() {
   // パイメニュー（中心 ~300,300・半径 ~160）に被らないよう、左下に配置。
   // パネルは left スロットの x/y を基準に1ブロックとして描く。
   return [
-    { kind: "left", head: null, x: -20, y: 500 },
-    { kind: "middle", head: null, x: -20, y: 500 },
-    { kind: "wheel_up", head: null, x: -20, y: 500 },
-    { kind: "wheel_down", head: null, x: -20, y: 500 },
+    { kind: "left", head: null, x: -20, y: 500, label: "" },
+    { kind: "middle", head: null, x: -20, y: 500, label: "" },
+    { kind: "wheel_up", head: null, x: -20, y: 500, label: "" },
+    { kind: "wheel_down", head: null, x: -20, y: 500, label: "" },
   ];
 }
 
@@ -701,7 +701,7 @@ function makeProfile(name) {
     enabled: true,
     segments,
     nodes,
-    app_nodes: [{ name: "", x: 720, y: 560, enabled: true }],
+    app_nodes: [{ name: "", x: 720, y: 560, enabled: true, exclude_titles: [] }],
     quick_slots: quick,
     quick_hud_visible: true,
     pie_visible: true,
@@ -1112,6 +1112,14 @@ function nodeShortName(node) {
     name = name.replace(/\.[^.]+$/, ""); // 拡張子除去
     return `${name}起動`;
   }
+  if (kind === "special") {
+    const parts = [];
+    (node.mods || []).forEach((m) => parts.push(SPECIAL_MOD_LABELS[m] || m));
+    (node.clicks || []).forEach((c) => parts.push(SPECIAL_CLICK_LABELS[c] || c));
+    const body = parts.join("+");
+    if (!body) return "特殊キー";
+    return node.release ? `${body}離す` : body;
+  }
   // key。記号キー名は表示用に記号へ（"Ctrl+equal"→"Ctrl+="）。
   return val ? prettyCombo(val) : ""; // "Ctrl+C" 等。未入力なら ""。
 }
@@ -1285,7 +1293,7 @@ function setupCanvasPanZoom(ctx = currentCtx) {
       // 拾ってしまうので、「マッチ要素がこの面（editor）に属するか」も確認する。
       // そうしないと内包面では常に外側 .anode に当たって矩形選択が始まらない。
       const hit = e.target.closest(
-        ".anode, .app-node, .qpanel, .pv-seg, .pv-label, .pv-label-bg, " +
+        ".anode, .app-node, .qpanel, .initial-panel, .pv-seg, .pv-label, .pv-label-bg, " +
           ".pv-hub, .pv-move-handle, .pv-outer-handle, .pv-handle-hit, .pv-rotate-handle, " +
           ".connector-hit, input, select, button",
       );
@@ -1424,9 +1432,15 @@ function startMarquee(e, ctx = currentCtx) {
     onMarqueeUp(ctx);
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    window.removeEventListener("blur", up);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+  // Win+Shift+S 等でフォーカスを奪われると pointerup が来ず矩形が残るため、
+  // 入力中断・フォーカス喪失でも終了させる。
+  window.addEventListener("pointercancel", up);
+  window.addEventListener("blur", up);
 }
 function onMarqueeMove(e, ctx = currentCtx) {
   const marquee = ctx.marquee;
@@ -1549,13 +1563,28 @@ function startKnife(e, ctx = currentCtx) {
     onEmpty: !onSomething,
   };
   const move = (ev) => onKnifeMove(ev, ctx);
-  const up = () => {
-    onKnifeUp(ctx);
+  const cleanup = () => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", cancel);
+    window.removeEventListener("blur", cancel);
+  };
+  const up = () => {
+    onKnifeUp(ctx);
+    cleanup();
+  };
+  // フォーカス喪失・入力中断ではメニューを開かず静かに破棄する
+  // （up 扱いにすると「動かさず離した」判定でメニューが開いてしまう）。
+  const cancel = () => {
+    ctx.knife = null;
+    clearKnifeTrail(ctx);
+    hideKnifeHint();
+    cleanup();
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", cancel);
+  window.addEventListener("blur", cancel);
 }
 
 function onKnifeMove(e, ctx = currentCtx) {
@@ -1574,11 +1603,13 @@ function onKnifeMove(e, ctx = currentCtx) {
   // この移動区間 a→b が、いずれかの配線（折れ線）と交差したら切る。
   const toCut = new Set(); // セグメント index
   const toCutQuick = new Set(); // クイックスロット参照
+  let cutInitial = false; // 初期アクション配線を切ったか
   for (const conn of ctx.connectorGeo) {
     const pts = conn.pts;
     for (let i = 0; i + 1 < pts.length; i++) {
       if (segIntersect(a, b, pts[i], pts[i + 1])) {
-        if (conn.quickSlot) toCutQuick.add(conn.quickSlot);
+        if (conn.initial) cutInitial = true;
+        else if (conn.quickSlot) toCutQuick.add(conn.quickSlot);
         else toCut.add(conn.segIndex);
         break;
       }
@@ -1601,17 +1632,18 @@ function onKnifeMove(e, ctx = currentCtx) {
   if (knife.trail.length > 16) knife.trail.shift(); // 軌跡は直近だけ
 
   const cutBlocks = cutNodeIds.length > 0 || cutApps.length > 0;
-  if (toCut.size > 0 || toCutQuick.size > 0 || cutBlocks) {
+  if (toCut.size > 0 || toCutQuick.size > 0 || cutInitial || cutBlocks) {
     knife.cut = true;
     if (cutBlocks) knife.cutBlocks = true;
     const p = profile(ctx);
-    // 配線を切る（セグメント＋クイックスロット）。
+    // 配線を切る（セグメント＋クイックスロット＋初期アクション）。
     toCut.forEach((si) => {
       if (p.segments[si]) p.segments[si].head = null;
     });
     toCutQuick.forEach((slot) => {
       slot.head = null;
     });
+    if (cutInitial) p.initial_head = null;
     // ブロックを削除（ノードはチェーン込み）。
     if (cutNodeIds.length > 0) {
       const ids = new Set();
@@ -1622,6 +1654,7 @@ function onKnifeMove(e, ctx = currentCtx) {
       (p.quick_slots || []).forEach((q) => {
         if (q.head && ids.has(q.head)) q.head = null;
       });
+      if (p.initial_head && ids.has(p.initial_head)) p.initial_head = null;
       p.nodes.forEach((n) => {
         if (n.next && ids.has(n.next)) n.next = null;
       });
@@ -1732,7 +1765,13 @@ function openCanvasContextMenu(clientX, clientY, world, ctx = currentCtx) {
   if (!ctx.parentCtx) {
     addItem("対象アプリを追加", () => {
       const p = profile(ctx);
-      p.app_nodes.push({ name: "", x: px, y: py, enabled: true });
+      p.app_nodes.push({
+        name: "",
+        x: px,
+        y: py,
+        enabled: true,
+        exclude_titles: [],
+      });
       markDirty();
       render(ctx);
     });
@@ -1923,6 +1962,7 @@ function render(ctx = currentCtx) {
   scheduleConnectors(ctx);
   renderApps(ctx);
   renderQuickSlots(ctx);
+  renderInitialPanel(ctx);
   applySelectionClasses(ctx);
 
   // 右上ミニマップ（ルート面のみ）。中身が変わったので描き直す。
@@ -2348,7 +2388,7 @@ function renderPreview(ctx = currentCtx) {
       text.setAttribute("text-anchor", "middle");
       text.setAttribute("dominant-baseline", "central");
       text.setAttribute("class", "pv-label" + (isAuto ? " auto" : ""));
-      text.textContent = shown;
+      setSvgMultilineText(text, shown, pos.x);
       text.dataset.tip = segTip;
       text.dataset.index = String(i);
       textLayer.appendChild(text);
@@ -2470,8 +2510,122 @@ function renderPreview(ctx = currentCtx) {
   }
 }
 
+// 特殊キー: 修飾キー・クリックのトークンと表示名。
+const SPECIAL_MODS = [
+  ["Shift", "⇧ Shift"],
+  ["Ctrl", "✳ Control"],
+  ["Alt", "⌥ Alt"],
+  ["Space", "␣ スペース"],
+];
+const SPECIAL_CLICKS = [
+  ["left", "左"],
+  ["middle", "中ボタン"],
+  ["right", "右"],
+  ["wheel", "マウスホイール"],
+];
+const SPECIAL_MOD_LABELS = Object.fromEntries(
+  SPECIAL_MODS.map(([v, t]) => [v, t.replace(/^[^ ]+ /, "")]),
+);
+const SPECIAL_CLICK_LABELS = Object.fromEntries(SPECIAL_CLICKS);
+
+// 特殊キー編集ポップオーバー（ワコム風・チェックボックス＋押す/離すトグル）。
+let specialPopEl = null;
+function closeSpecialEditor() {
+  if (specialPopEl) {
+    specialPopEl.remove();
+    specialPopEl = null;
+  }
+  window.removeEventListener("pointerdown", onSpecialOutside, true);
+}
+function onSpecialOutside(e) {
+  if (specialPopEl && !specialPopEl.contains(e.target)) closeSpecialEditor();
+}
+function openSpecialEditor(node, btn, onChange, ctx = currentCtx) {
+  closeSpecialEditor();
+  if (!Array.isArray(node.mods)) node.mods = [];
+  if (!Array.isArray(node.clicks)) node.clicks = [];
+
+  const pop = document.createElement("div");
+  pop.className = "special-pop";
+  pop.innerHTML = `<div class="special-title">特殊キー</div>
+    <div class="special-desc">押す修飾キー／クリックを選びます。<br>
+    修飾キーについては「離す」アクションまで押しっぱなしになります。</div>`;
+
+  const cols = document.createElement("div");
+  cols.className = "special-cols";
+  const makeCol = (heading, list, arrName) => {
+    const col = document.createElement("div");
+    col.className = "special-col";
+    const h = document.createElement("div");
+    h.className = "special-col-h";
+    h.textContent = heading;
+    col.appendChild(h);
+    list.forEach(([val, txt]) => {
+      const lab = document.createElement("label");
+      lab.className = "special-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = node[arrName].includes(val);
+      cb.addEventListener("change", () => {
+        const arr = node[arrName];
+        const i = arr.indexOf(val);
+        if (cb.checked && i < 0) arr.push(val);
+        else if (!cb.checked && i >= 0) arr.splice(i, 1);
+        markDirty();
+        onChange();
+      });
+      lab.append(cb, document.createTextNode(" " + txt));
+      col.appendChild(lab);
+    });
+    return col;
+  };
+  cols.append(
+    makeCol("キー", SPECIAL_MODS, "mods"),
+    makeCol("クリック", SPECIAL_CLICKS, "clicks"),
+  );
+  pop.appendChild(cols);
+
+  // 押す/離すトグル（セグメント型スイッチ＝どちらか一方が点灯する見た目）。
+  const modeWrap = document.createElement("div");
+  modeWrap.className = "special-mode";
+  const modeLabel = document.createElement("span");
+  modeLabel.className = "special-mode-label";
+  modeLabel.textContent = "動作";
+  const seg = document.createElement("div");
+  seg.className = "special-seg";
+  const syncSeg = () => seg.classList.toggle("is-release", !!node.release);
+  const mkMode = (rel, txt) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = txt;
+    b.className = "special-seg-btn" + (rel ? " seg-release" : " seg-press");
+    b.addEventListener("click", () => {
+      node.release = rel;
+      markDirty();
+      onChange();
+      syncSeg();
+    });
+    return b;
+  };
+  seg.append(mkMode(false, "押す（保持）"), mkMode(true, "離す"));
+  syncSeg();
+  modeWrap.append(modeLabel, seg);
+  pop.appendChild(modeWrap);
+
+  // 位置: ボタンの下に絶対配置（body 直下、画面座標）。
+  document.body.appendChild(pop);
+  const r = btn.getBoundingClientRect();
+  pop.style.left = `${Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)}px`;
+  pop.style.top = `${r.bottom + 4}px`;
+  specialPopEl = pop;
+  setTimeout(() => {
+    window.addEventListener("pointerdown", onSpecialOutside, true);
+  }, 0);
+}
+
 // ノードの値要素を種別に応じて作る。
 //   key      → キーキャプチャボタン（クリックして押したキーを取得・手打ち無し）
+//   special  → 特殊キー（修飾キー＋クリック、押す/離す）
 //   launch   → テキスト入力（パス/URL）
 //   settings → 値なし（表示のみ）
 function buildValueEl(node, ctx = currentCtx) {
@@ -2498,6 +2652,30 @@ function buildValueEl(node, ctx = currentCtx) {
     return span;
   }
 
+  if (kind === "special") {
+    // 特殊キー: 修飾キー(複数)＋クリック(複数)＋押す/離すモード。
+    // ボタンに要約を表示、クリックでワコム風ポップオーバーを開く。
+    if (!Array.isArray(node.mods)) node.mods = [];
+    if (!Array.isArray(node.clicks)) node.clicks = [];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "f-key f-capture";
+    const summarize = () => {
+      const parts = [];
+      node.mods.forEach((m) => parts.push(SPECIAL_MOD_LABELS[m] || m));
+      node.clicks.forEach((c) => parts.push(SPECIAL_CLICK_LABELS[c] || c));
+      const body = parts.join("+") || "特殊キー設定";
+      btn.textContent = node.release ? `${body}（離す）` : body;
+      btn.classList.toggle("empty", parts.length === 0);
+    };
+    summarize();
+    btn.addEventListener("click", () => {
+      if (ctx.nodeDragMoved) return;
+      openSpecialEditor(node, btn, summarize, ctx);
+    });
+    return btn;
+  }
+
   if (kind === "menu") {
     // メニュー: このノード自身がインラインのサブメニュー（新規・独立）を持つ。
     // 「メニュー▼」の横のテキストは、このノードを指すセグメントのラベルと連動し、
@@ -2507,7 +2685,9 @@ function buildValueEl(node, ctx = currentCtx) {
       sub && Array.isArray(sub.segments) ? sub.segments.length : 0;
     const fallback = segCount > 0 ? `サブメニュー(${segCount})` : "サブメニュー";
 
-    const segIdx = segIndexForHead(node.id, ctx);
+    // メニューがスタックの途中/末尾でも連動できるよう、スタック先頭で引く
+    // （例: 特殊キー(Ctrl離す)→メニュー のとき、セグメントの head は特殊キー）。
+    const segIdx = segIndexForHead(stackHeadOf(node.id, ctx), ctx);
     const seg = segIdx >= 0 ? profile(ctx).segments[segIdx] : null;
 
     const input = document.createElement("input");
@@ -2749,6 +2929,7 @@ function renderNodes(ctx = currentCtx) {
     typeSel.className = "f-type";
     for (const [val, txt] of [
       ["key", "キー"],
+      ["special", "特殊キー"],
       ["launch", "起動"],
       ["settings", "設定"],
       ["menu", "メニュー"],
@@ -2776,25 +2957,9 @@ function renderNodes(ctx = currentCtx) {
       // 種別を跨ぐと value の意味が変わるのでクリア（settings/menu 切替含む）。
       if (typeSel.value === "settings") node.value = "";
       if (typeSel.value === "menu" || prev === "menu") node.value = "";
-      // メニュー（サブメニュー）ブロックは連結できない。メニューに変えたら、
-      // 上の親から切り離し（親の next を断つ）、自分の下の子も切り離す。
-      // 切り離したノードが重ならないよう、少しずらして単独配置にする。
-      if (typeSel.value === "menu") {
-        const parent = parentOf(node.id, ctx);
-        if (parent) {
-          parent.next = null;
-          node.x = (node.x || 0) + 40;
-          node.y = (node.y || 0) + 20;
-        }
-        if (node.next) {
-          const child = nodeById(node.next, ctx);
-          if (child) {
-            child.x = (child.x || 0) + 40;
-            child.y = (child.y || 0) + 20;
-          }
-          node.next = null;
-        }
-      }
+      // メニュー（サブメニュー）ブロックも上下に連結できる:
+      // 上＝サブメニューを開く前に実行、下＝サブメニュー内で発動後の「続き」。
+      // 種別変更での強制切り離しはしない。
       markDirty();
       // メニューへ/から切り替わると edit ボタンの有無が変わる（edit は値要素
       // ではなくノード行に出る別要素）。値だけでなくノード全体を描き直す。
@@ -3422,6 +3587,57 @@ function drawConnectors(ctx = currentCtx) {
     ctx.connectorGeo.push({ quickSlot: slot, pts });
   });
 
+  // 初期アクションパネル → head ノードへの配線（ルート面のみ）。
+  if (!ctx.parentCtx && p.initial_head) {
+    const sp = initialPortPos(ctx);
+    const np = nodeLeft(p.initial_head);
+    if (sp && np) {
+      const dist = Math.hypot(np.x - sp.x, np.y - sp.y);
+      const lead = Math.max(40, dist * 0.3);
+      const c1x = sp.x + lead;
+      const c1y = sp.y;
+      const approach = Math.max(28, dist * 0.3);
+      const c2x = np.x - approach;
+      const c2y = np.y;
+      const d = `M ${sp.x} ${sp.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${np.x} ${np.y}`;
+      const hit = document.createElementNS(SVG_NS, "path");
+      hit.setAttribute("d", d);
+      hit.setAttribute("class", "connector-hit");
+      hit.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        p.initial_head = null;
+        markDirty();
+        render(ctx);
+      });
+      svg.appendChild(hit);
+      const line = document.createElementNS(SVG_NS, "path");
+      line.setAttribute("d", d);
+      line.setAttribute("class", "connector");
+      line.setAttribute("stroke", "#c9a2ff"); // 初期アクションは紫系
+      svg.appendChild(line);
+      const pts = [];
+      const N = 12;
+      for (let t = 0; t <= N; t++) {
+        const u = t / N;
+        const mt = 1 - u;
+        pts.push({
+          x:
+            mt * mt * mt * sp.x +
+            3 * mt * mt * u * c1x +
+            3 * mt * u * u * c2x +
+            u * u * u * np.x,
+          y:
+            mt * mt * mt * sp.y +
+            3 * mt * mt * u * c1y +
+            3 * mt * u * u * c2y +
+            u * u * u * np.y,
+        });
+      }
+      ctx.connectorGeo.push({ initial: true, pts });
+    }
+  }
+
   // 合体スタック（next）はノードを隙間なく積んで一体のブロックに見せるので、
   // ノード間に線は引かない（縦線は冗長）。
 
@@ -3653,32 +3869,30 @@ function snapCandidate(ctx = currentCtx) {
   const drag = ctx.drag;
   if (!drag) return null;
   const p = profile(ctx);
-  // ドラッグ中がメニュー（サブメニュー）ブロックなら、どこにも連結させない
-  // （サブメニューブロックは常に単独で扱う）。
-  const dragNode = nodeById(drag.id, ctx);
-  if (dragNode && (dragNode.type || "key") === "menu") return null;
+  // メニュー（サブメニュー）ブロックも普通に連結できる:
+  // 上に積んだ分＝サブメニューを開く前に実行（例: Ctrl離す→メニュー）、
+  // 下に積んだ分＝サブメニュー内で発動した後の「続き」として実行。
   const inChain = new Set(drag.chain);
   const myEl = ownOne(ctx, `.anode[data-id="${drag.id}"]`);
   if (!myEl) return null;
   const mb = myEl.getBoundingClientRect();
-  const myCx = mb.left + mb.width / 2;
 
   let best = null;
   let bestScore = Infinity;
   p.nodes.forEach((n) => {
     if (inChain.has(n.id)) return;
     if (n.next) return; // 既に下に何か繋がってるノードには積めない
-    // メニュー（サブメニュー）ブロックの下には連結させない。
-    if ((n.type || "key") === "menu") return;
     const el = ownOne(ctx, `.anode[data-id="${n.id}"]`);
     if (!el) return;
     const nb = el.getBoundingClientRect();
-    const nCx = nb.left + nb.width / 2;
-    const dx = Math.abs(myCx - nCx);
+    // 判定は**左端揃え**基準（スナップ後の整列も左端揃えなので一致させる）。
+    // 中心基準だと、巨大なメニューブロックを左端を揃えて重ねても中心が
+    // 大きくズレて判定に入らず「くっつかない」ことがあった。
+    const dx = Math.abs(mb.left - nb.left);
     const dy = mb.top - nb.bottom; // 自分の上端 − 相手の下端
     // ほぼ重ねたときだけ吸着する（近くに置くだけでは合体しない）。
-    // 横は幅の4割以内、縦は相手の下端 -10〜+14px のみ。
-    if (dx > nb.width * 0.4) return;
+    // 横は相手幅の5割以内、縦は相手の下端 -10〜+14px のみ。
+    if (dx > nb.width * 0.5) return;
     if (dy < -10 || dy > 14) return;
     const score = dx + Math.abs(dy); // 近いほど小さい
     if (score < bestScore) {
@@ -4703,6 +4917,26 @@ function openColorPicker(index, ctx = currentCtx, clientX, clientY) {
   }, 0);
 }
 
+// ラベルを改行("\n")対応で SVG <text> に流し込む（main.js と同じ作り）。
+// 複数行は <tspan> を縦に並べ、ブロック中心が text の y に来るよう先頭行を
+// 半分持ち上げる（dominant-baseline:central 前提）。
+function setSvgMultilineText(text, label, x) {
+  const lines = String(label ?? "").split("\n");
+  if (lines.length <= 1) {
+    text.textContent = lines[0] ?? "";
+    return;
+  }
+  const LH = 1.15; // 行間(em)
+  text.textContent = "";
+  lines.forEach((line, i) => {
+    const ts = document.createElementNS(SVG_NS, "tspan");
+    ts.setAttribute("x", String(x));
+    ts.setAttribute("dy", i === 0 ? `${(-(lines.length - 1) * LH) / 2}em` : `${LH}em`);
+    ts.textContent = line || " "; // 空行でも行送りを保つ
+    text.appendChild(ts);
+  });
+}
+
 function editLabelInline(index, svgX, svgY, ctx = currentCtx) {
   const preview = ctx.el.preview;
   const seg = profile(ctx).segments[index];
@@ -4717,20 +4951,29 @@ function editLabelInline(index, svgX, svgY, ctx = currentCtx) {
   const left = svgX;
   const top = svgY;
 
-  const input = document.createElement("input");
-  input.type = "text";
+  // 改行できるよう textarea（Shift+Enter=改行 / Enter=確定 / Esc=取消）。
+  const input = document.createElement("textarea");
   input.className = "pv-label-edit";
+  input.rows = 1;
   // 手動ラベルのみ表示（空なら自動命名中＝未設定として空欄で出す）。
   input.value = seg.label || "";
   input.placeholder = "未設定（接続内容から自動）";
+  input.title = "Shift+Enter で改行";
   input.style.left = `${left}px`;
   input.style.top = `${top}px`;
   preview.appendChild(input);
+  // 行数に合わせて高さを追従（1行なら従来の見た目のまま）。
+  const autoRows = () => {
+    input.rows = Math.max(1, input.value.split("\n").length);
+  };
+  autoRows();
+  input.addEventListener("input", autoRows);
   input.focus();
   input.select();
 
   const commit = () => {
     // 空にすると「未設定」＝自動命名モードへ戻る（label を空に）。
+    // trim は前後のみ＝途中の改行は保持される。
     seg.label = input.value.trim();
     markDirty();
     input.remove();
@@ -4740,13 +4983,14 @@ function editLabelInline(index, svgX, svgY, ctx = currentCtx) {
     scheduleConnectors(ctx);
   };
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       commit();
     } else if (e.key === "Escape") {
       e.preventDefault();
       input.remove();
     }
+    // Shift+Enter は既定動作＝改行挿入。
   });
   input.addEventListener("blur", commit);
 }
@@ -4840,11 +5084,21 @@ function renderQuickSlots(ctx = currentCtx) {
   panel.style.top = `${base.y ?? 300}px`;
   panel.dataset.tip = "右クリックを押しながら\nこれらの操作をした時の挙動";
   panel.dataset.tipAnchor = "element"; // パネルの上（or下）に固定表示
+  // 触った順の重なり（ノード/アプリと同じ扱い）。これが無いと z-index 未設定
+  // のままになり、一度でも触った大きなメニューブロック等に完全に隠れて
+  // 「パネルが見えない」状態になる。
+  applyBlockZ(panel, "qpanel");
+  panel.addEventListener(
+    "pointerdown",
+    () => bringBlockToFront(panel, "qpanel"),
+    true,
+  );
   // 枠（マウス絵・ラベル）を掴んでパネルごとドラッグ。◯・ボタンは除外。
   // 左ボタンのみ。右ボタンはキャンバスへ通してナイフ/右クリメニューに。
   panel.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest(".qslot-port, .qpanel-toggle")) return;
+    if (e.target.closest(".qslot-port, .qpanel-toggle, .qslot-label, input"))
+      return;
     startQuickPanelDrag(e, ctx);
   });
 
@@ -4895,6 +5149,22 @@ function renderQuickSlots(ctx = currentCtx) {
     name.textContent = QUICK_LABELS[kind] || kind;
     row.appendChild(name);
 
+    // 手動ラベル（本番 HUD に表示する名前）。クリックでインライン編集。
+    // 空なら接続内容から自動命名（セグメントと同じ流儀）、未接続は「未設定」。
+    // autoSegName は head を辿るだけなのでスロットをそのまま渡せる。
+    const manual = (slot.label || "").trim();
+    const lab = document.createElement("span");
+    lab.className = "qslot-label" + (manual ? "" : " auto");
+    lab.textContent = manual || autoSegName(slot, ctx);
+    lab.dataset.tip = "本番メニューでこの操作に出す名前\nクリックで変更";
+    lab.dataset.tipAnchor = "element";
+    lab.addEventListener("pointerdown", (e) => e.stopPropagation());
+    lab.addEventListener("click", (e) => {
+      e.stopPropagation();
+      editQuickLabelInline(idx, lab, ctx);
+    });
+    row.appendChild(lab);
+
     // 配線用◯ポート（行の右端）。
     const port = document.createElement("span");
     port.className = "qslot-port";
@@ -4918,6 +5188,42 @@ function renderQuickSlots(ctx = currentCtx) {
   panel.appendChild(body);
 
   host.appendChild(panel);
+}
+
+// クイックスロットのラベルをその場で編集する（span を input に差し替え）。
+// Enter/フォーカス外れ=確定、Esc=取消。空にすると自動命名（未接続は「未設定」）
+// に戻る。
+function editQuickLabelInline(slotIndex, labEl, ctx = currentCtx) {
+  const slot = (profile(ctx).quick_slots || [])[slotIndex];
+  if (!slot) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "qslot-label-edit";
+  input.value = slot.label || "";
+  input.placeholder = "未設定";
+  input.addEventListener("pointerdown", (e) => e.stopPropagation());
+  labEl.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    slot.label = input.value.trim();
+    markDirty();
+    render(ctx);
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      done = true;
+      render(ctx); // 描き直しで span に戻す
+    }
+  });
+  input.addEventListener("blur", commit);
 }
 
 // クイックパネル全体のドラッグ移動（4スロットの x/y を同じ量だけ動かす）。
@@ -5121,6 +5427,172 @@ function quickPortPos(idx, ctx = currentCtx) {
   return clientToWorld(r.left + r.width / 2, r.top + r.height / 2, ctx);
 }
 
+// ── 初期アクションパネル（ルート面のみ） ──────────────────────────
+// パイ表示の瞬間に実行するアクションの配線口。マウスパネル風の1行パネル。
+// ここに「特殊キー(Ctrl押す)」を繋ぐと、開いた瞬間に Ctrl 押しっぱなしになり、
+// 離してキー送出する頃には修飾キー処理が済んで 1F で反映される。
+function renderInitialPanel(ctx = currentCtx) {
+  const host = ctx.el.nodes;
+  host.querySelectorAll(":scope > .initial-panel").forEach((el) => el.remove());
+  // ルート面のみ（子/孫サブメニューには出さない）。
+  if (ctx.parentCtx) return;
+  const p = profile(ctx);
+  // 既定位置（未設定=0,0 のとき）はパイの右上あたり。
+  if (!p.initial_x && !p.initial_y) {
+    p.initial_x = -320;
+    p.initial_y = 120;
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "initial-panel";
+  panel.dataset.tip = "パイを開いた瞬間に実行するアクションを繋ぎます";
+  panel.dataset.tipAnchor = "element";
+  panel.style.left = `${p.initial_x}px`;
+  panel.style.top = `${p.initial_y}px`;
+  applyBlockZ(panel, "initial");
+  panel.addEventListener(
+    "pointerdown",
+    () => bringBlockToFront(panel, "initial"),
+    true,
+  );
+  // 枠を掴んでパネル移動（◯は除外）。左ボタンのみ。
+  panel.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest(".qslot-port")) return;
+    startInitialPanelDrag(e, ctx);
+  });
+
+  const label = document.createElement("span");
+  label.className = "initial-label";
+  label.textContent = "最初に実行";
+
+  const port = document.createElement("span");
+  port.className = "qslot-port initial-port";
+  if (p.initial_head) port.classList.add("linked");
+  port.addEventListener("pointerdown", (e) => startInitialLinkDrag(e, ctx));
+  port.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (p.initial_head) {
+      p.initial_head = null;
+      markDirty();
+      render(ctx);
+    }
+  });
+
+  panel.append(label, port);
+  host.appendChild(panel);
+}
+
+// 初期パネルの◯ポート中心（world 座標）。
+function initialPortPos(ctx = currentCtx) {
+  const port = ctx.el.nodes.querySelector(":scope > .initial-panel .initial-port");
+  if (!port) return null;
+  const r = port.getBoundingClientRect();
+  return clientToWorld(r.left + r.width / 2, r.top + r.height / 2, ctx);
+}
+
+// 初期パネルのドラッグ移動。
+function startInitialPanelDrag(e, ctx = currentCtx) {
+  e.preventDefault();
+  const p = profile(ctx);
+  const w = clientToWorld(e.clientX, e.clientY, ctx);
+  const drag = { ox: p.initial_x || 0, oy: p.initial_y || 0, sx: w.x, sy: w.y };
+  const move = (ev) => {
+    const nw = clientToWorld(ev.clientX, ev.clientY, ctx);
+    p.initial_x = drag.ox + (nw.x - drag.sx);
+    p.initial_y = drag.oy + (nw.y - drag.sy);
+    const el = ctx.el.nodes.querySelector(":scope > .initial-panel");
+    if (el) {
+      el.style.left = `${p.initial_x}px`;
+      el.style.top = `${p.initial_y}px`;
+    }
+    scheduleConnectors(ctx);
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    markDirty();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
+// 初期パネルの◯からノードへ配線（クイックスロットの簡易版）。
+function startInitialLinkDrag(e, ctx = currentCtx) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  ctx.initialLink = true;
+  const move = (ev) => {
+    drawConnectors(ctx);
+    const svg = ctx.el.connectors;
+    const sp = initialPortPos(ctx);
+    if (!sp) return;
+    const w = clientToWorld(ev.clientX, ev.clientY, ctx);
+    const cx = (sp.x + w.x) / 2;
+    const line = document.createElementNS(SVG_NS, "path");
+    line.setAttribute(
+      "d",
+      `M ${sp.x} ${sp.y} C ${cx} ${sp.y}, ${cx} ${w.y}, ${w.x} ${w.y}`,
+    );
+    line.setAttribute("class", "connector linking");
+    svg.appendChild(line);
+    const dropped = nodeAtPoint(ev.clientX, ev.clientY, ctx);
+    const overId = dropped ? stackHeadOf(dropped, ctx) : null;
+    ownAll(ctx, ".anode.link-target").forEach((el) => {
+      if (el.dataset.id !== overId) el.classList.remove("link-target");
+    });
+    if (overId) {
+      const el = ownOne(ctx, `.anode[data-id="${overId}"]`);
+      if (el) el.classList.add("link-target");
+    }
+  };
+  const up = (ev) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    ctx.initialLink = false;
+    const p = profile(ctx);
+    const dropped = nodeAtPoint(ev.clientX, ev.clientY, ctx);
+    const overId = dropped ? stackHeadOf(dropped, ctx) : null;
+    if (overId) {
+      clearLinksTo(overId, ctx);
+      p.initial_head = overId;
+      markDirty();
+    } else {
+      // 何もない所 → 新規ノードを作って配線（特殊キーの雛形にしておく）。
+      const onSelf = e.target.closest(".initial-panel");
+      const onPie = ev.target.closest(
+        ".pv-seg, .pv-label, .pv-label-bg, .pv-hub, .pv-move-handle, " +
+          ".pv-outer-handle, .pv-handle-hit, .pv-rotate-handle, .qpanel",
+      );
+      if (!onSelf && !onPie) {
+        const id = newNodeId(ctx);
+        const w = clientToWorld(ev.clientX, ev.clientY, ctx);
+        p.nodes.push({
+          id,
+          type: "special",
+          value: "",
+          mods: [],
+          clicks: [],
+          release: false,
+          x: w.x - 16,
+          y: w.y - 14,
+          next: null,
+        });
+        p.initial_head = id;
+        markDirty();
+      }
+    }
+    ownAll(ctx, ".anode.link-target").forEach((el) =>
+      el.classList.remove("link-target"),
+    );
+    render(ctx);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
 // ── 右クリック対象アプリ ──────────────────────────────────────────
 // 対象アプリをキャンバス上のパネルとして描く（ノードと同じく自由配置）。
 function renderApps(ctx = currentCtx) {
@@ -5186,8 +5658,53 @@ function renderApps(ctx = currentCtx) {
       render(ctx);
     });
 
-    // 1行レイアウト: アプリ名 → トグル（削除ボタンは廃止＝Del/コピペで代替）。
-    el.append(capBtn, toggle);
+    // 除外タブ追加。クリック→カウントダウン→前面窓のタイトルを取得して追加。
+    const exAdd = document.createElement("button");
+    exAdd.className = "app-exclude-add";
+    exAdd.type = "button";
+    exAdd.textContent = "除外＋";
+    exAdd.dataset.tip =
+      "タイトルにこの文字列を含むタブ/窓では\nメニューを出さない";
+    exAdd.dataset.tipAnchor = "element";
+    exAdd.addEventListener("click", () => {
+      captureExcludeTitle(index, exAdd, ctx);
+    });
+
+    // 1行目: アプリ名 → トグル → 除外追加（削除ボタンは廃止＝Del/コピペで代替）。
+    const mainRow = document.createElement("div");
+    mainRow.className = "app-row";
+    mainRow.append(capBtn, toggle, exAdd);
+    el.appendChild(mainRow);
+
+    // 除外タブ（タイトル一部一致）の一覧。手編集も可。
+    if (!Array.isArray(app.exclude_titles)) app.exclude_titles = [];
+    app.exclude_titles.forEach((t, ti) => {
+      const row = document.createElement("div");
+      row.className = "app-exclude-row";
+      const mark = document.createElement("span");
+      mark.className = "app-exclude-mark";
+      mark.textContent = "🚫";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = t;
+      input.placeholder = "タイトルの一部";
+      input.addEventListener("input", () => {
+        app.exclude_titles[ti] = input.value;
+        markDirty();
+      });
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "app-exclude-del";
+      del.textContent = "✕";
+      del.addEventListener("click", () => {
+        app.exclude_titles.splice(ti, 1);
+        markDirty();
+        render(ctx);
+      });
+      row.append(mark, input, del);
+      el.appendChild(row);
+    });
+
     host.appendChild(el);
   });
 }
@@ -5324,6 +5841,49 @@ async function captureAppForNode(index, btn, ctx = currentCtx) {
     statusEl.textContent = "取得失敗: " + e;
   } finally {
     btn.disabled = false;
+    picking = false;
+    render(ctx);
+    setTimeout(() => (statusEl.textContent = ""), 3000);
+  }
+}
+
+// 除外タブの追加。2秒後の前面ウィンドウのタイトルを取得してリストへ足す。
+// Chrome 等はタブ名がタイトルになるので「特定タブだけオフ」に使える。
+async function captureExcludeTitle(index, btn, ctx = currentCtx) {
+  if (picking) return;
+  picking = true;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  for (let s = 2; s >= 1; s--) {
+    btn.textContent = `${s}秒以内に対象タブへ…`;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  try {
+    const title = await invoke("foreground_window_title");
+    const app = profile(ctx).app_nodes[index];
+    if (!app) return;
+    if (!title) {
+      statusEl.textContent = "取得できませんでした（自分の窓のまま？）";
+    } else {
+      // "ページ名 - Google Chrome" のブラウザ名サフィックスは除いて保存する
+      // （残すと意味がない上、タブ名の一部だけ残して手編集する手間が増える）。
+      const trimmed = title
+        .replace(
+          /\s[-–—]\s(google chrome|microsoft\s?edge|mozilla firefox|firefox|brave|vivaldi|opera|chromium)\s*$/i,
+          "",
+        )
+        .trim();
+      if (!Array.isArray(app.exclude_titles)) app.exclude_titles = [];
+      app.exclude_titles.push(trimmed || title);
+      markDirty();
+      statusEl.textContent = `除外タブ取得: ${trimmed || title}`;
+    }
+  } catch (e) {
+    console.error("[settings] foreground_window_title failed:", e);
+    statusEl.textContent = "取得失敗: " + e;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
     picking = false;
     render(ctx);
     setTimeout(() => (statusEl.textContent = ""), 3000);

@@ -50,6 +50,10 @@ pub struct QuickSlot {
     pub x: f64,
     #[serde(default)]
     pub y: f64,
+    /// 手動ラベル（本番 HUD に表示）。空なら接続内容から自動命名、
+    /// 未接続は「未設定」表示。
+    #[serde(default)]
+    pub label: String,
 }
 
 /// アクションノード。キャンバスに自由配置でき、未接続でも置いておける。
@@ -58,11 +62,21 @@ pub struct QuickSlot {
 pub struct ActionNode {
     /// 一意 id（接続・合体の参照用）。
     pub id: String,
-    /// 種別 "key" / "launch"。
+    /// 種別 "key" / "launch" / "settings" / "menu" / "special"。
     #[serde(rename = "type")]
     pub kind: String,
-    /// 値（"Ctrl+C" やパス/URL）。
+    /// 値（"Ctrl+C" やパス/URL）。special では未使用。
     pub value: String,
+    // ── 特殊キー(kind=="special")用 ──
+    /// 押す/離す対象の修飾キー（"Ctrl"/"Shift"/"Alt"/"Space"）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<String>,
+    /// 送るクリック（"left"/"middle"/"right"/"wheel"）。押すモードのみ有効。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clicks: Vec<String>,
+    /// true=修飾キーを離す / false(既定)=修飾キーを押す（押しっぱなし）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub release: bool,
     /// キャンバス上の位置。
     #[serde(default)]
     pub x: f64,
@@ -96,6 +110,18 @@ pub struct AppNode {
     /// 有効/無効。無効なら右クリック対象から外す。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 除外タイトル。カーソル下ウィンドウのタイトルにこのいずれかの文字列が
+    /// 含まれるとき、このアプリでは乗っ取らない（通常の右クリックに戻す）。
+    /// Chrome などタブ名がタイトルになるアプリで「特定タブだけオフ」に使う。
+    #[serde(default)]
+    pub exclude_titles: Vec<String>,
+}
+
+/// マウスフックへ渡す乗っ取り対象1件（実行ファイル名＋除外タイトル、全て小文字）。
+#[derive(Debug, Clone)]
+pub struct HookTarget {
+    pub name: String,
+    pub exclude_titles: Vec<String>,
 }
 
 /// 1つのプロファイル。所属アプリで右クリックするとこのパイが出る。
@@ -123,6 +149,17 @@ pub struct Profile {
     /// クイックスロット（左/中クリック・ホイール上下）。既定で4つ。
     #[serde(default = "default_quick_slots")]
     pub quick_slots: Vec<QuickSlot>,
+    /// 初期アクションの接続先スタック先頭ノード id（ルートプロファイルのみ）。
+    /// パイ表示（右クリック開始）の瞬間にこのスタックを実行する。
+    /// 例: 特殊キー(Ctrl押す)を繋ぐと、開いた瞬間に Ctrl を押しっぱなしにでき、
+    /// 離してキー送出する頃には修飾キー処理が済んで反映が速くなる。
+    #[serde(default)]
+    pub initial_head: Option<String>,
+    /// 初期アクションパネル（設定エディタ上の配線パネル）のキャンバス位置。
+    #[serde(default)]
+    pub initial_x: f64,
+    #[serde(default)]
+    pub initial_y: f64,
     /// 本番メニュー表示中にクイックスロット HUD（マウス絵）を表示するか。
     #[serde(default = "default_true")]
     pub quick_hud_visible: bool,
@@ -166,6 +203,9 @@ pub struct Profile {
 fn default_true() -> bool {
     true
 }
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 fn default_outer_r() -> f64 {
     160.0
 }
@@ -180,11 +220,18 @@ fn default_opacity() -> f64 {
 fn default_quick_slots() -> Vec<QuickSlot> {
     // パイ（中心 ~300,300・半径 ~160）に被らないよう左下へ。パネルは left の
     // x/y を基準に1ブロックで描くので 4 つとも同じ座標で良い。
+    let slot = |kind: &str| QuickSlot {
+        kind: kind.into(),
+        head: None,
+        x: 40.0,
+        y: 500.0,
+        label: String::new(),
+    };
     vec![
-        QuickSlot { kind: "left".into(), head: None, x: 40.0, y: 500.0 },
-        QuickSlot { kind: "middle".into(), head: None, x: 40.0, y: 500.0 },
-        QuickSlot { kind: "wheel_up".into(), head: None, x: 40.0, y: 500.0 },
-        QuickSlot { kind: "wheel_down".into(), head: None, x: 40.0, y: 500.0 },
+        slot("left"),
+        slot("middle"),
+        slot("wheel_up"),
+        slot("wheel_down"),
     ]
 }
 
@@ -256,15 +303,38 @@ impl Profile {
             .collect()
     }
 
-    /// 指定セグメントのサブメニュー実体（接続スタック先頭ノードのインライン
-    /// submenu）を複製して返す。無ければ None。
+    /// 指定セグメントのサブメニュー実体を複製して返す。無ければ None。
+    /// メニューノードはスタックの先頭でなくてもよい（例: 特殊キー(Ctrl離す)→
+    /// メニュー と積むと、サブメニューを開く前に前段を実行できる）。
     pub fn segment_submenu(&self, seg_index: usize) -> Option<Profile> {
         let stack = self.stack_for_segment(seg_index);
-        let head = stack.first()?;
-        if head.kind != "menu" {
-            return None;
+        let menu = stack.iter().find(|n| n.kind == "menu")?;
+        menu.submenu.as_ref().map(|b| (**b).clone())
+    }
+
+    /// 指定セグメントのスタックのうち「メニューノードより前」のアクション群。
+    /// サブメニューを開く直前に実行する（特殊キーの押す/離す等）。
+    pub fn segment_pre_menu_actions(&self, seg_index: usize) -> Vec<&ActionNode> {
+        self.stack_for_segment(seg_index)
+            .into_iter()
+            .take_while(|n| n.kind != "menu")
+            .collect()
+    }
+
+    /// 指定セグメントのスタックのうち「メニューノードより後」のアクション群。
+    /// サブメニュー内で項目が選ばれて実行された後に、続きとして実行する
+    /// （例: メニュー→特殊キー(Ctrl押す) でサブメニューから戻ったら Ctrl 復帰）。
+    pub fn segment_post_menu_actions(&self, seg_index: usize) -> Vec<&ActionNode> {
+        let mut found = false;
+        let mut out = Vec::new();
+        for n in self.stack_for_segment(seg_index) {
+            if found {
+                out.push(n);
+            } else if n.kind == "menu" {
+                found = true;
+            }
         }
-        head.submenu.as_ref().map(|b| (**b).clone())
+        out
     }
 
     /// セグメントの接続内容から自動の名前を作る（JS 側 autoSegName と同じ規則）。
@@ -291,20 +361,28 @@ impl Profile {
         self.quick_slots
             .iter()
             .map(|q| {
-                let names: Vec<String> = self
-                    .stack_for_quick(&q.kind)
-                    .iter()
-                    .map(|n| node_short_name(n))
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let label = if names.is_empty() {
-                    String::new()
+                // 手動ラベル優先。空なら接続内容から自動命名（セグメントと
+                // 同じ流儀）。未接続は空＝フロントが「未設定」表示にする。
+                let manual = q.label.trim();
+                let label = if !manual.is_empty() {
+                    manual.to_string()
                 } else {
-                    let shown = names.iter().take(2).cloned().collect::<Vec<_>>().join("→");
-                    if names.len() > 2 {
-                        format!("{shown}…")
+                    let names: Vec<String> = self
+                        .stack_for_quick(&q.kind)
+                        .iter()
+                        .map(|n| node_short_name(n))
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if names.is_empty() {
+                        String::new()
                     } else {
-                        shown
+                        let shown =
+                            names.iter().take(2).cloned().collect::<Vec<_>>().join("→");
+                        if names.len() > 2 {
+                            format!("{shown}…")
+                        } else {
+                            shown
+                        }
                     }
                 };
                 ResolvedQuick {
@@ -322,6 +400,7 @@ pub struct ResolvedQuick {
     pub kind: String,
     pub label: String,
 }
+
 
 /// 1ノードを簡潔な文言にする。例: キー→"Ctrl+C"、起動→"notepad起動"。
 fn node_short_name(node: &ActionNode) -> String {
@@ -359,6 +438,15 @@ pub struct Config {
     #[serde(default)]
     pub active_profile: Option<String>,
 
+    /// 【作者専用・隠し機能】クリスタ無遅延化用の Pro Micro シリアルポート
+    /// （例 "COM11"）。設定されているとキー送出を SendInput でなく
+    /// Pro Micro（本物 HID キーボード）経由にする。クリスタ等の注入遅延
+    /// （SendInput は 5-6F）を回避して 2F にできる。
+    /// 空/未設定なら従来どおり SendInput（配布版はこちら＝ハード不要）。
+    /// UI からは触れない隠しフラグ（config.json を直接編集して有効化）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hid_port: String,
+
     // ── 旧形式フィールド（読み込み互換のためだけに受ける。保存はしない） ──
     /// 旧: 単一の items。新形式では使わない。migrate でプロファイルへ移す。
     #[serde(default, skip_serializing)]
@@ -377,6 +465,7 @@ fn apps_to_app_nodes(apps: &[String]) -> Vec<AppNode> {
             x: 360.0,
             y: 360.0 + i as f64 * 44.0,
             enabled: true,
+            exclude_titles: Vec::new(),
         })
         .collect()
 }
@@ -418,6 +507,9 @@ fn items_to_segments_nodes(items: &[MenuItem]) -> (Vec<Segment>, Vec<ActionNode>
             id,
             kind: item.action.kind.clone(),
             value: item.action.value.clone(),
+            mods: Vec::new(),
+            clicks: Vec::new(),
+            release: false,
             x: 360.0,
             y: 20.0 + i as f64 * 70.0,
             next: None,
@@ -454,6 +546,9 @@ fn default_profile() -> Profile {
             id: s1_id.clone(),
             kind: "key".into(),
             value: String::new(),
+            mods: Vec::new(),
+            clicks: Vec::new(),
+            release: false,
             x: 660.0,
             y: 300.0,
             next: None,
@@ -465,6 +560,9 @@ fn default_profile() -> Profile {
             id: ql_id.clone(),
             kind: "key".into(),
             value: String::new(),
+            mods: Vec::new(),
+            clicks: Vec::new(),
+            release: false,
             x: 160.0,
             y: 660.0,
             next: None,
@@ -488,8 +586,17 @@ fn default_profile() -> Profile {
         enabled: true,
         segments,
         nodes,
-        app_nodes: vec![AppNode { name: String::new(), x: 720.0, y: 560.0, enabled: true }],
+        app_nodes: vec![AppNode {
+            name: String::new(),
+            x: 720.0,
+            y: 560.0,
+            enabled: true,
+            exclude_titles: Vec::new(),
+        }],
         quick_slots,
+        initial_head: None,
+        initial_x: 0.0,
+        initial_y: 0.0,
         quick_hud_visible: true,
         pie_visible: true,
         outer_r: default_outer_r(),
@@ -511,6 +618,7 @@ impl Default for Config {
             hotkey: "F8".into(),
             profiles: vec![default_profile()],
             active_profile: Some("default".into()),
+            hid_port: String::new(),
             items: Vec::new(),
             right_click_apps: Vec::new(),
         }
@@ -539,6 +647,9 @@ impl Config {
                 nodes,
                 app_nodes: apps_to_app_nodes(&apps),
                 quick_slots: default_quick_slots(),
+                initial_head: None,
+                initial_x: 0.0,
+                initial_y: 0.0,
                 quick_hud_visible: true,
                 pie_visible: true,
                 outer_r: default_outer_r(),
@@ -596,9 +707,11 @@ impl Config {
     }
 
     /// 全プロファイルの所属アプリ（有効なもののみ）を小文字で集めて返す。
-    /// マウスフックの「乗っ取り対象」判定に渡す。
-    pub fn all_target_apps(&self) -> Vec<String> {
-        let mut out = Vec::new();
+    /// マウスフックの「乗っ取り対象」判定に渡す。除外タイトルも一緒に渡す。
+    /// 同じアプリが複数プロファイルにある場合は最初の1つを採用する
+    /// （profile_for_app と同じ「先勝ち」で一貫させる）。
+    pub fn hook_targets(&self) -> Vec<HookTarget> {
+        let mut out: Vec<HookTarget> = Vec::new();
         for p in &self.profiles {
             if !p.enabled {
                 continue;
@@ -607,9 +720,17 @@ impl Config {
                 if !a.enabled {
                     continue;
                 }
-                let a = a.name.trim().to_ascii_lowercase();
-                if !a.is_empty() && !out.contains(&a) {
-                    out.push(a);
+                let name = a.name.trim().to_ascii_lowercase();
+                if !name.is_empty() && !out.iter().any(|t| t.name == name) {
+                    out.push(HookTarget {
+                        name,
+                        exclude_titles: a
+                            .exclude_titles
+                            .iter()
+                            .map(|t| t.trim().to_lowercase())
+                            .filter(|t| !t.is_empty())
+                            .collect(),
+                    });
                 }
             }
         }

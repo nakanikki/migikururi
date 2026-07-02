@@ -25,3 +25,8 @@ dist-ssr
 
 # プロジェクト固有
 _backup/
+*.lnk
+# Rust ビルド産物（config.json 等のローカル実行ファイルも target 内にある）
+src-tauri/target/
+# 外部配布物（Interception ドライバ一式は同梱しない。実験記録は docs 参照）
+tools/interception/

@@ -12,9 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 #[cfg(windows)]
 use std::sync::Mutex;
 
-/// 右クリック乗っ取りの対象アプリ（実行ファイル名・小文字）。空なら乗っ取り無効。
+/// 右クリック乗っ取りの対象アプリ（実行ファイル名・小文字＋除外タイトル）。
+/// 空なら乗っ取り無効。
 #[cfg(windows)]
-static TARGET_APPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static TARGET_APPS: Mutex<Vec<crate::config::HookTarget>> = Mutex::new(Vec::new());
 
 /// 自分が合成した右クリックを素通しする残り回数（無限ループ防止）。
 /// down/up の2イベントを素通しさせるため単一フラグでなくカウンタにする。
@@ -103,16 +104,25 @@ pub fn target_hwnd() -> isize {
     0
 }
 
-/// 乗っ取り対象アプリのリストを更新する（設定変更時に呼ぶ）。
+/// キー送出先（TARGET_HWND）を現在の前面窓にリセットする。
+/// F8 トグルなど「右クリック起点でない」表示で、前ジェスチャの窓を
+/// 引きずって誤った窓を前面化しないようにする。
 #[cfg(windows)]
-pub fn set_target_apps(apps: Vec<String>) {
-    let lowered: Vec<String> = apps
-        .iter()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-    eprintln!("[piemenu][hook] set_target_apps -> {lowered:?}");
-    *TARGET_APPS.lock().unwrap() = lowered;
+pub fn retarget_foreground() {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let h = unsafe { GetForegroundWindow() };
+    TARGET_HWND.store(h.0 as isize, Ordering::Relaxed);
+}
+#[cfg(not(windows))]
+pub fn retarget_foreground() {}
+
+/// 乗っ取り対象アプリのリストを更新する（設定変更時に呼ぶ）。
+/// name/exclude_titles は config::hook_targets() 側で小文字化済み。
+#[cfg(windows)]
+pub fn set_target_apps(targets: Vec<crate::config::HookTarget>) {
+    let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+    eprintln!("[piemenu][hook] set_target_apps -> {names:?}");
+    *TARGET_APPS.lock().unwrap() = targets;
 }
 
 /// 次の1イベント分、右クリックを素通しする（合成送出する直前に呼ぶ）。
@@ -163,6 +173,38 @@ fn foreground_process_name() -> Option<String> {
     unsafe { process_name_of_hwnd(GetForegroundWindow()) }
 }
 
+/// 指定 HWND のウィンドウタイトルを取得する。
+/// GetWindowTextW は他プロセスのトップレベル窓ではタイトルのキャッシュを読む
+/// だけ（メッセージ送信しない）ので、フックコールバック内でも安全。
+#[cfg(windows)]
+fn window_title_of_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    unsafe {
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        if len <= 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// 現在の前面ウィンドウのタイトルを取得する。設定UIの
+/// 「最前面ウィンドウのタイトルを取得」（除外タブ設定）用。
+#[cfg(windows)]
+pub fn current_foreground_title() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { window_title_of_hwnd(GetForegroundWindow()) }
+}
+
+#[cfg(not(windows))]
+pub fn current_foreground_title() -> Option<String> {
+    None
+}
+
 /// スクリーン座標 (x, y) の下にあるトップレベルウィンドウの HWND を返す。
 #[cfg(windows)]
 fn toplevel_hwnd_at(x: i32, y: i32) -> windows::Win32::Foundation::HWND {
@@ -191,6 +233,53 @@ pub fn current_foreground_app() -> Option<String> {
     None
 }
 
+/// 除外タイトル判定。カーソル下の窓のタイトルで判定するが、コンテキスト
+/// メニュー等のポップアップはタイトルが無いため、所有者チェーンのルート
+/// （＝メインウィンドウ）→ 同アプリの前面窓、の順にタイトルを探して判定する。
+/// 除外タブで出た本来の右クリックメニューの上に2回目の右クリックをしたとき、
+/// ポップアップ自体のタイトルが空でパイが出てしまう問題の対策。
+#[cfg(windows)]
+fn title_excluded(
+    under: windows::Win32::Foundation::HWND,
+    app_name: &str,
+    patterns: &[String],
+) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetForegroundWindow, GA_ROOTOWNER,
+    };
+
+    let matches = |title: &str| {
+        let title = title.to_lowercase();
+        patterns.iter().any(|pat| title.contains(pat.as_str()))
+    };
+
+    // 1) カーソル直下のトップレベル窓のタイトル。あればこれが正。
+    if let Some(title) = window_title_of_hwnd(under) {
+        if !title.trim().is_empty() {
+            return matches(&title);
+        }
+    }
+    unsafe {
+        // 2) タイトルが無い＝ポップアップ等。所有者チェーンのルート窓で判定。
+        let owner = GetAncestor(under, GA_ROOTOWNER);
+        if owner != under {
+            if let Some(title) = window_title_of_hwnd(owner) {
+                if !title.trim().is_empty() {
+                    return matches(&title);
+                }
+            }
+        }
+        // 3) それでも不明なら、同じアプリの前面窓のタイトルで判定（保険）。
+        let fg = GetForegroundWindow();
+        if fg != under && process_name_of_hwnd(fg).as_deref() == Some(app_name) {
+            if let Some(title) = window_title_of_hwnd(fg) {
+                return matches(&title);
+            }
+        }
+    }
+    false
+}
+
 /// 右クリック位置(x,y)で乗っ取り対象を判定する。判定は「カーソルの直下にある
 /// ウィンドウのアプリ」だけで行う（フォーカス＝前面アプリは見ない）。
 /// 例: 対象アプリにフォーカスがあっても、カーソルが別アプリの上なら奪わない。
@@ -212,7 +301,12 @@ fn target_at_point(x: i32, y: i32) -> Option<String> {
     // ここが対象でなければ奪わない（前面アプリへはフォールバックしない）。
     let under = toplevel_hwnd_at(x, y);
     if let Some(name) = process_name_of_hwnd(under) {
-        if targets.iter().any(|t| t == &name) {
+        if let Some(t) = targets.iter().find(|t| t.name == name) {
+            // 除外タイトル: 窓タイトルに指定文字列を含むなら乗っ取らない
+            // （Chrome の特定タブなどで通常の右クリックに戻す）。
+            if !t.exclude_titles.is_empty() && title_excluded(under, &name, &t.exclude_titles) {
+                return None;
+            }
             TARGET_HWND.store(under.0 as isize, Ordering::Relaxed);
             return Some(name);
         }
@@ -393,7 +487,7 @@ pub fn start(app: tauri::AppHandle) {
 pub fn start(_app: tauri::AppHandle) {}
 
 #[cfg(not(windows))]
-pub fn set_target_apps(_apps: Vec<String>) {}
+pub fn set_target_apps(_targets: Vec<crate::config::HookTarget>) {}
 
 #[cfg(not(windows))]
 pub fn pass_through_next() {}

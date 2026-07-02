@@ -176,7 +176,7 @@ function buildPie() {
     text.setAttribute("text-anchor", "middle");
     text.setAttribute("dominant-baseline", "central");
     text.setAttribute("class", "seg-label");
-    text.textContent = li.label;
+    setSvgMultilineText(text, li.label, li.x);
     text.style.pointerEvents = "none"; // クリックは下の seg(g) が拾う
     textLayer.appendChild(text);
     labelTexts.push({ bg, text });
@@ -215,6 +215,26 @@ function buildPie() {
     bg.setAttribute("width", String(bb.width + padX * 2));
     bg.setAttribute("height", String(bb.height + padY * 2));
   }
+}
+
+// ラベルを改行("\n")対応で SVG <text> に流し込む。複数行は <tspan> を縦に
+// 並べ、ブロック全体の中心が text の y に来るよう先頭行を半分持ち上げる
+// （dominant-baseline:central 前提）。単一行は従来どおり textContent。
+function setSvgMultilineText(text, label, x) {
+  const lines = String(label ?? "").split("\n");
+  if (lines.length <= 1) {
+    text.textContent = lines[0] ?? "";
+    return;
+  }
+  const LH = 1.15; // 行間(em)
+  text.textContent = "";
+  lines.forEach((line, i) => {
+    const ts = document.createElementNS(SVG_NS, "tspan");
+    ts.setAttribute("x", String(x));
+    ts.setAttribute("dy", i === 0 ? `${(-(lines.length - 1) * LH) / 2}em` : `${LH}em`);
+    ts.textContent = line || " "; // 空行でも行送りを保つ
+    text.appendChild(ts);
+  });
 }
 
 // クイックスロット HUD（マウス絵＋4ボタンの割当ラベル）を描く。
